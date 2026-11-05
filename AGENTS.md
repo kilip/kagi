@@ -49,8 +49,8 @@ Multi-module monorepo with `go.work`. Each directory with its own `go.mod` is a 
 - Never log passwords, tokens, OTP codes or OAuth secrets.
 
 ## Tooling
-- `mise` manages tools and tasks: `mise run test`, `mise run vet`, `mise run fmt`, `mise run mock`.
-- Mocks use `go.uber.org/mock` (`mockgen`).
+- `mise` manages tools and tasks: `mise run test`, `mise run vet`, `mise run fmt`, `mise run mock`, `mise run openapi`.
+- Mocks use `go.uber.org/mock` (`mockgen`). OpenAPI 3.1 specs use `swaggo/swag` v2 (`swag`).
 - Git hooks via `lefthook`. Commits must follow Conventional Commits (checked by `cog verify`).
 
 ## Git & commits

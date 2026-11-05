@@ -6,7 +6,7 @@ Thank you for your interest in contributing to **Kagi**! This document covers th
 
 Kagi uses [mise](https://mise.jdx.dev/) to manage tool versions and development tasks, [lefthook](https://github.com/evilmartians/lefthook) for Git hooks, and [cocogitto](https://docs.cocogitto.io/) (`cog`) to verify commit messages.
 
-1. Install required tools (`go`, `lefthook`, `cocogitto`):
+1. Install required tools (`go`, `lefthook`, `cocogitto`, `swag`):
    ```bash
    mise install
    ```
@@ -74,6 +74,9 @@ mise run test
 
 # Regenerate mocks (go generate ./...)
 mise run mock
+
+# Generate OpenAPI 3.1 spec from Go comments in http/fiber
+mise run openapi
 ```
 
 ## Git & Commit Conventions

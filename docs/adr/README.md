@@ -21,6 +21,7 @@ Product scope lives in the [PRD](../prd.md); delivery is tracked in the
 | [0010](0010-expiry-and-cleanup.md) | Expiry handling and cleanup | Accepted |
 | [0011](0011-string-ids.md) | String IDs in domain and ports | Accepted |
 | [0012](0012-account-linking-policy.md) | Account linking policy | Accepted |
+| [0013](0013-openapi-v3-contract.md) | OpenAPI 3.1 contract via Go comments and sentinel error mapping | Accepted |
 
 ## When to write an ADR
 

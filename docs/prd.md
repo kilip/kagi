@@ -20,7 +20,7 @@ Go backend developers who want to own their auth (no hosted service) and keep co
 - Database adapter: **ent**
 - Rate limiting that works without Redis (DB-backed by default)
 - Secondary storage adapter: **Redis** (optional)
-- HTTP wrapper: **Fiber**
+- HTTP wrapper: **Fiber** (with OpenAPI 3.1 spec generated from Go comments)
 
 ## Out of MVP (deferred)
 SMS delivery, TOTP and backup codes, JWT sessions, gorm and sqlc adapters, HTTP wrappers other than Fiber.
@@ -46,6 +46,7 @@ SMS delivery, TOTP and backup codes, JWT sessions, gorm and sqlc adapters, HTTP 
 - ID type: `string` (see [ADR-0011](adr/0011-string-ids.md)).
 - OAuth presets at MVP: Google and GitHub.
 - Account linking policy (see [ADR-0012](adr/0012-account-linking-policy.md)).
+- OpenAPI 3.1 HTTP contract and sentinel error mapping (see [ADR-0013](adr/0013-openapi-v3-contract.md)).
 - Password reset is in MVP scope.
 
 ## Roadmap
@@ -64,3 +65,4 @@ See [Roadmap MVP](https://github.com/users/kilip/projects/11) (target `v0.1.0`: 
 - [ADR-0010: Expiry handling and cleanup](adr/0010-expiry-and-cleanup.md)
 - [ADR-0011: String IDs in domain and ports](adr/0011-string-ids.md)
 - [ADR-0012: Account linking policy](adr/0012-account-linking-policy.md)
+- [ADR-0013: OpenAPI 3.1 contract via Go comments and sentinel error mapping](adr/0013-openapi-v3-contract.md)

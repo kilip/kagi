@@ -14,10 +14,10 @@ Kagi gives Go backend teams a self-hosted, batteries-included authentication lay
 
 ## Features (MVP Scope)
 
-- **Email & Password:** Sign up, sign in, and sign out with `argon2id` password hashing.
-- **OAuth 2.0:** Social sign-in built on `golang.org/x/oauth2` with provider presets.
+- **Email & Password:** Sign up, sign in, sign out, and password reset with `argon2id` password hashing.
+- **OAuth 2.0:** Social sign-in built on `golang.org/x/oauth2` with Google and GitHub presets.
 - **Email OTP:** Passwordless sign-in, two-factor authentication (2FA), and email verification with attempt limits and per-email/per-IP rate limiting.
-- **Account Linking:** Multiple login methods linked to a single user account.
+- **Account Linking:** Multiple login methods linked to a single user account; OAuth sign-ins auto-link only when the provider verifies the email.
 - **Opaque Sessions:** High-entropy `crypto/rand` tokens stored as hashes in the database.
 - **Optional Secondary Storage (Redis):** Session caching and fast rate limiting via Redis, with full fallback to database-backed rate limiting when Redis is not configured.
 - **Safe Expiry & Cleanup:** Strict read-time expiry checks (`expires_at > now`) plus idempotent, batched cleanup helpers (`Cleanup` / opt-in `RunCleanup`).

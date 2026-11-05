@@ -5,7 +5,7 @@ Guidance for AI coding agents working on Kagi.
 ## Project
 Kagi is an open-source (MIT) reusable authentication library for Go. Module path: `github.com/kilip/kagi`.
 
-MVP scope: email/password, OAuth, and OTP (email only: passwordless login, 2FA, email verification), with multiple login methods per user.
+MVP scope: email/password (including password reset), OAuth (Google and GitHub presets), and OTP (email only: passwordless login, 2FA, email verification), with multiple login methods per user.
 
 ## Docs
 - Product scope: `docs/prd.md`. Architecture decisions: `docs/adr/` (index in `docs/adr/README.md`). Read the relevant ADRs before changing ports, the data model, security behavior or core dependencies.
@@ -29,6 +29,8 @@ Multi-module monorepo with `go.work`. Each directory with its own `go.mod` is a 
 - Core is HTTP-agnostic. Cookies, headers and requests are handled only in `http/*` wrappers.
 - Storage is accessed through ports (`UserStore`, `AccountStore`, `SessionStore`, `VerificationStore`, `RateLimitStore`, `SecondaryStorage`). Adapter types must not leak into core.
 - Data model: `user`, `account` (one row per login method), `session`, `verification`, `rate_limit`.
+- Entity IDs are `string` in domain structs and ports; adapters convert to native column types (ADR-0011).
+- Account linking: auto-link an OAuth sign-in to an existing user only when the provider asserts a verified email; never unlink a user's last login method (ADR-0012).
 - Sessions are opaque tokens. Store only the hash. `SecondaryStorage` (Redis) is optional: when configured it caches sessions and handles rate limits; the database is always the source of truth. Everything must work without Redis (DB-backed rate limiting).
 - Email is sent through a `Mailer` interface implemented by the host app. Do not add SMTP/SES code to core.
 - OAuth is built on `golang.org/x/oauth2`.

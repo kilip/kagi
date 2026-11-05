@@ -4,8 +4,8 @@ use (
 	.
 	./adapter/ent
 	./adapter/gorm
-	./adapter/sqlc
 	./adapter/redis
-	./http/fiber
+	./adapter/sqlc
 	./examples/fiber-ent
+	./http/fiber
 )

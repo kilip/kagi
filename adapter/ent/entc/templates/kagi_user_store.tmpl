@@ -1,0 +1,228 @@
+{{/* gotype: entgo.io/ent/entc/gen.Graph */}}
+
+{{ define "kagi_user_store" }}
+
+{{ $pkg := base $.Config.Package }}
+{{ template "header" $ }}
+
+{{/* Find the node that represents the Kagi User */}}
+{{ $userNode := "" }}
+{{ range $n := $.Nodes }}
+	{{ if or (hasKey $n.Annotations "KagiUser") (eq $n.Name "User") }}
+		{{ $userNode = $n }}
+	{{ end }}
+{{ end }}
+
+{{ if $userNode }}
+import (
+	"context"
+	{{- if or $userNode.ID.IsInt $userNode.ID.IsInt64 }}
+	"strconv"
+	{{- end }}
+	{{- if $userNode.ID.IsUUID }}
+	"github.com/google/uuid"
+	{{- end }}
+
+	"github.com/kilip/kagi"
+	{{ $userNode.Package }} "{{ $userNode.Config.Package }}/{{ $userNode.PackageDir }}"
+)
+
+// KagiUserStore implements kagi.UserStore using the ent client.
+type KagiUserStore struct {
+	client *Client
+}
+
+// NewKagiUserStore creates a new kagi.UserStore backed by ent.
+func NewKagiUserStore(client *Client) *KagiUserStore {
+	return &KagiUserStore{client: client}
+}
+
+var _ kagi.UserStore = (*KagiUserStore)(nil)
+
+// Create inserts a new user into the database.
+func (s *KagiUserStore) Create(ctx context.Context, u *kagi.User) error {
+	builder := s.client.{{ $userNode.Name }}.Create().
+		SetEmail(u.Email).
+		SetName(u.Name).
+		SetEmailVerified(u.EmailVerified).
+		SetTwoFactorEnabled(u.TwoFactorEnabled)
+
+	if !u.CreatedAt.IsZero() {
+		builder.SetCreatedAt(u.CreatedAt)
+	}
+	if !u.UpdatedAt.IsZero() {
+		builder.SetUpdatedAt(u.UpdatedAt)
+	}
+
+	created, err := builder.Save(ctx)
+	if err != nil {
+		if IsConstraintError(err) {
+			return kagi.ErrEmailAlreadyExists
+		}
+		return err
+	}
+
+	u.CreatedAt = created.CreatedAt
+	u.UpdatedAt = created.UpdatedAt
+
+	{{ if $userNode.ID.IsInt -}}
+	u.ID = strconv.Itoa(created.ID)
+	{{- else if $userNode.ID.IsInt64 -}}
+	u.ID = strconv.FormatInt(created.ID, 10)
+	{{- else if $userNode.ID.IsString -}}
+	u.ID = created.ID
+	{{- else if $userNode.ID.IsUUID -}}
+	u.ID = created.ID.String()
+	{{- else -}}
+	u.ID = strconv.Itoa(created.ID)
+	{{- end }}
+	return nil
+}
+
+// GetByID retrieves a user by their string ID.
+func (s *KagiUserStore) GetByID(ctx context.Context, id string) (*kagi.User, error) {
+	{{ if $userNode.ID.IsInt -}}
+	parsedID, err := strconv.Atoi(id)
+	if err != nil {
+		return nil, kagi.ErrUserNotFound
+	}
+	{{- else if $userNode.ID.IsInt64 -}}
+	parsedID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return nil, kagi.ErrUserNotFound
+	}
+	{{- else if $userNode.ID.IsUUID -}}
+	parsedID, err := uuid.Parse(id)
+	if err != nil {
+		return nil, kagi.ErrUserNotFound
+	}
+	{{- else -}}
+	parsedID := id
+	{{- end }}
+
+	entity, err := s.client.{{ $userNode.Name }}.Get(ctx, parsedID)
+	if err != nil {
+		if IsNotFound(err) {
+			return nil, kagi.ErrUserNotFound
+		}
+		return nil, err
+	}
+
+	return s.toKagiUser(entity), nil
+}
+
+// GetByEmail retrieves a user by email.
+func (s *KagiUserStore) GetByEmail(ctx context.Context, email string) (*kagi.User, error) {
+	entity, err := s.client.{{ $userNode.Name }}.Query().
+		Where({{ $userNode.Package }}.EmailEQ(email)).
+		Only(ctx)
+	if err != nil {
+		if IsNotFound(err) {
+			return nil, kagi.ErrUserNotFound
+		}
+		return nil, err
+	}
+
+	return s.toKagiUser(entity), nil
+}
+
+// Update updates an existing user.
+func (s *KagiUserStore) Update(ctx context.Context, u *kagi.User) error {
+	{{ if $userNode.ID.IsInt -}}
+	parsedID, err := strconv.Atoi(u.ID)
+	if err != nil {
+		return kagi.ErrUserNotFound
+	}
+	{{- else if $userNode.ID.IsInt64 -}}
+	parsedID, err := strconv.ParseInt(u.ID, 10, 64)
+	if err != nil {
+		return kagi.ErrUserNotFound
+	}
+	{{- else if $userNode.ID.IsUUID -}}
+	parsedID, err := uuid.Parse(u.ID)
+	if err != nil {
+		return kagi.ErrUserNotFound
+	}
+	{{- else -}}
+	parsedID := u.ID
+	{{- end }}
+
+	builder := s.client.{{ $userNode.Name }}.UpdateOneID(parsedID).
+		SetEmail(u.Email).
+		SetName(u.Name).
+		SetEmailVerified(u.EmailVerified).
+		SetTwoFactorEnabled(u.TwoFactorEnabled)
+
+	if !u.UpdatedAt.IsZero() {
+		builder.SetUpdatedAt(u.UpdatedAt)
+	}
+
+	err = builder.Exec(ctx)
+	if err != nil {
+		if IsNotFound(err) {
+			return kagi.ErrUserNotFound
+		}
+		if IsConstraintError(err) {
+			return kagi.ErrEmailAlreadyExists
+		}
+		return err
+	}
+
+	return nil
+}
+
+// Delete removes a user by ID.
+func (s *KagiUserStore) Delete(ctx context.Context, id string) error {
+	{{ if $userNode.ID.IsInt -}}
+	parsedID, err := strconv.Atoi(id)
+	if err != nil {
+		return kagi.ErrUserNotFound
+	}
+	{{- else if $userNode.ID.IsInt64 -}}
+	parsedID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return kagi.ErrUserNotFound
+	}
+	{{- else if $userNode.ID.IsUUID -}}
+	parsedID, err := uuid.Parse(id)
+	if err != nil {
+		return kagi.ErrUserNotFound
+	}
+	{{- else -}}
+	parsedID := id
+	{{- end }}
+
+	err = s.client.{{ $userNode.Name }}.DeleteOneID(parsedID).Exec(ctx)
+	if err != nil {
+		if IsNotFound(err) {
+			return kagi.ErrUserNotFound
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (s *KagiUserStore) toKagiUser(entity *{{ $userNode.Name }}) *kagi.User {
+	return &kagi.User{
+		{{ if $userNode.ID.IsInt -}}
+		ID: strconv.Itoa(entity.ID),
+		{{- else if $userNode.ID.IsInt64 -}}
+		ID: strconv.FormatInt(entity.ID, 10),
+		{{- else if $userNode.ID.IsString -}}
+		ID: entity.ID,
+		{{- else if $userNode.ID.IsUUID -}}
+		ID: entity.ID.String(),
+		{{- else -}}
+		ID: strconv.Itoa(entity.ID),
+		{{- end }}
+		Email:            entity.Email,
+		Name:             entity.Name,
+		EmailVerified:    entity.EmailVerified,
+		TwoFactorEnabled: entity.TwoFactorEnabled,
+		CreatedAt:        entity.CreatedAt,
+		UpdatedAt:        entity.UpdatedAt,
+	}
+}
+{{ end }}
+{{ end }}

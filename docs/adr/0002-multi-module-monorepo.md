@@ -10,4 +10,4 @@ One repository, module path `github.com/kilip/kagi`. Core is the root module. Ea
 
 ## Consequences
 - Minimal dependency footprint for users.
-- Submodules need path-prefixed tags (e.g. `adapter/ent/v0.1.0`); release strategy is still open.
+- Submodules need path-prefixed tags (e.g. `adapter/ent/v1.0.0`); release strategy is still open.

@@ -2,7 +2,7 @@
 
 Reusable, framework-agnostic authentication library for Go. *Kagi* (鍵) means "key" in Japanese.
 
-> **Status:** Early development (`v0.x`). Documentation and API specification are available in [**docs/**](./docs/).
+> **Status:** MVP ships as `v1.0.0`. Documentation and API specification are available in [**docs/**](./docs/).
 
 ## Overview
 

@@ -1,7 +1,7 @@
 // Package fiber provides Fiber handlers and middleware for Kagi.
 //
 //	@title						Kagi Authentication API
-//	@version					0.1.0
+//	@version					1.0.0
 //	@description				Reusable authentication HTTP API powered by Kagi.
 //	@license.name				MIT
 //	@license.url				https://opensource.org/licenses/MIT

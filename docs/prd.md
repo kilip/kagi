@@ -1,6 +1,6 @@
 # Kagi — PRD (lite)
 
-Status: Draft v0.3 · Date: 2026-11-05 · License: MIT · Module: `github.com/kilip/kagi`
+Status: Accepted v1 · Date: 2026-11-05 · License: MIT · Module: `github.com/kilip/kagi`
 
 ## Problem
 Go has no reusable, batteries-included auth library comparable to Better Auth: framework-agnostic, storage-pluggable, and customizable. Teams re-implement sessions, password hashing, OAuth and OTP in every project.
@@ -29,7 +29,7 @@ SMS delivery, TOTP and backup codes, JWT sessions, gorm and sqlc adapters, HTTP 
 1. Core depends only on stdlib and `golang.org/x/*`.
 2. Adapters and HTTP wrappers are separate Go modules.
 3. Secure by default (hashed secrets, constant-time compare, rate-limited OTP).
-4. README-driven API design; stay small and stable (v0.x, then semver).
+4. README-driven API design; stay small and stable (MVP ships as v1.0.0, semver from then on).
 5. Users can fully customize their schema.
 
 ## Success criteria
@@ -52,7 +52,7 @@ SMS delivery, TOTP and backup codes, JWT sessions, gorm and sqlc adapters, HTTP 
 - Password reset is in MVP scope.
 
 ## Roadmap
-See [Roadmap MVP](https://github.com/users/kilip/projects/11) (target `v0.1.0`: 2027-03-10).
+See [Roadmap MVP](https://github.com/users/kilip/projects/11) (target `v1.0.0`: 2027-03-10).
 
 ## Related
 - [ADR-0001: HTTP-agnostic core service layer](adr/0001-http-agnostic-core.md)

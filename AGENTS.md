@@ -7,6 +7,11 @@ Kagi is an open-source (MIT) reusable authentication library for Go. Module path
 
 MVP scope: email/password, OAuth, and OTP (email only: passwordless login, 2FA, email verification), with multiple login methods per user.
 
+## Docs
+- Product scope: `docs/prd.md`. Architecture decisions: `docs/adr/` (index in `docs/adr/README.md`). Read the relevant ADRs before changing ports, the data model, security behavior or core dependencies.
+- Decisions that are expensive to reverse need a new ADR from `docs/adr/template.md`. Never rewrite an accepted ADR; supersede it.
+- Work is tracked in the GitHub Project (https://github.com/users/kilip/projects/11) and repo milestones M0–M8.
+
 ## Layout
 Multi-module monorepo with `go.work`. Each directory with its own `go.mod` is a separate module.
 

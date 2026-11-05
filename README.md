@@ -45,6 +45,12 @@ Kagi is organized as a multi-module monorepo so your application only pulls in t
 3. **Secure by default:** `argon2id` password hashes, hashed session/OTP/verification tokens generated with `crypto/rand`, constant-time comparisons, and built-in rate limiting.
 4. **Everything works without Redis:** The primary database is always the source of truth; Redis is an optional performance and multi-instance enhancement.
 
+## Documentation
+
+- [Product requirements (PRD)](./docs/prd.md)
+- [Architecture decision records](./docs/adr/README.md)
+- [Roadmap and progress (GitHub Project)](https://github.com/users/kilip/projects/11)
+
 ## Contributing
 
 Contributions, issues, and feedback are welcome! Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup, architecture rules, and commit conventions before submitting a pull request.

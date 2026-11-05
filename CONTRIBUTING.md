@@ -32,6 +32,13 @@ Kagi is a multi-module Go monorepo coordinated with `go.work`. Every directory w
 | `http/fiber/` | Fiber HTTP handlers and middleware. |
 | `examples/` | Runnable end-to-end example applications. |
 
+## Product & Architecture Docs
+
+- [PRD](./docs/prd.md) defines MVP scope, principles and success criteria.
+- [ADRs](./docs/adr/README.md) record architectural decisions. Read the relevant ADRs before changing ports, the data model, security behavior or core dependencies.
+- Changes that are expensive to reverse need a new ADR (see [When to write an ADR](./docs/adr/README.md#when-to-write-an-adr)). Never rewrite an accepted ADR; supersede it.
+- Work is tracked in the [GitHub Project](https://github.com/users/kilip/projects/11) and repository milestones. Link issues and ADRs from your pull request.
+
 ## Architecture & Security Guidelines
 
 - **HTTP-agnostic core:** Core (`/`) must never import `net/http` request/cookie handling or web frameworks like Fiber. Cookies, headers, and HTTP transport belong strictly in `http/*` modules.
@@ -101,3 +108,5 @@ Before opening a pull request, make sure:
 - [ ] `mise run test` passes across all modules.
 - [ ] New or changed storage adapter functionality is covered in `adaptertest/`.
 - [ ] Public types and functions have clear Go doc comments.
+- [ ] Needs an ADR? If the change affects public API, ports, data model, security or core dependencies, an ADR is added or updated in `docs/adr/`.
+- [ ] The pull request links the related issue and ADRs.

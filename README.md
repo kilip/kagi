@@ -2,7 +2,7 @@
 
 Reusable, framework-agnostic authentication library for Go. *Kagi* (鍵) means "key" in Japanese.
 
-> **Status:** Early development (`v0.x`). The API is under active design and not yet stable.
+> **Status:** Early development (`v0.x`). Documentation and API specification are available in [**docs/**](./docs/).
 
 ## Overview
 
@@ -47,9 +47,7 @@ Kagi is organized as a multi-module monorepo so your application only pulls in t
 
 ## Documentation
 
-- [Product requirements (PRD)](./docs/prd.md)
-- [Architecture decision records](./docs/adr/README.md)
-- [Roadmap and progress (GitHub Project)](https://github.com/users/kilip/projects/11)
+Documentation, architecture specifications (ADRs), product requirements (PRD), and the public API specification are available in the [**docs/**](./docs/) directory.
 
 ## Contributing
 

@@ -1,0 +1,10 @@
+commit-msg:
+  commands:
+    conventional:
+      run: cog verify --file {1}
+
+pre-commit:
+  commands:
+    gofmt:
+      glob: "*.go"
+      run: test -z "$(gofmt -l {staged_files})"

@@ -1,0 +1,10 @@
+# Go
+*.test
+*.out
+coverage.*
+go.work.sum
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

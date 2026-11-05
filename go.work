@@ -1,0 +1,11 @@
+go 1.27
+
+use (
+	.
+	./adapter/ent
+	./adapter/gorm
+	./adapter/sqlc
+	./adapter/redis
+	./http/fiber
+	./examples/fiber-ent
+)

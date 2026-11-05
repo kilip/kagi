@@ -1,0 +1,20 @@
+[tools]
+go = "1.27"
+lefthook = "latest"
+cocogitto = "latest"
+
+[tasks.test]
+description = "Run tests in every workspace module"
+run = "for d in $(go list -m -f '{{ '{{.Dir}}' }}'); do (cd \"$d\" && go test ./...) || exit 1; done"
+
+[tasks.vet]
+description = "Run go vet in every workspace module"
+run = "for d in $(go list -m -f '{{ '{{.Dir}}' }}'); do (cd \"$d\" && go vet ./...) || exit 1; done"
+
+[tasks.fmt]
+description = "Format all Go code"
+run = "gofmt -w ."
+
+[tasks.mock]
+description = "Generate mocks (go.uber.org/mock)"
+run = "go generate ./..."

@@ -2,6 +2,14 @@
 
 Guidance for AI coding agents working on Kagi.
 
+## Conventions
+- Always plan first (outline affected files, approach, and reasoning) and wait for explicit user approval before executing tasks or writing code.
+- Never run `git commit` or `git push` automatically; always wait for explicit user approval before committing or pushing.
+- Run `gofmt` and `go vet` before finishing. Run tests in every module you touched.
+- New or changed adapter behavior must be covered by `adaptertest`.
+- Write table-driven tests. Use `internal/clock` instead of `time.Now()` in code under test.
+- Do not add dependencies to the core module without a clear reason.
+
 ## Project
 Kagi is an open-source (MIT) reusable authentication library for Go. Module path: `github.com/kilip/kagi`.
 
@@ -54,6 +62,7 @@ Multi-module monorepo with `go.work`. Each directory with its own `go.mod` is a 
 - Git hooks via `lefthook`. Commits must follow Conventional Commits (checked by `cog verify`).
 
 ## Git & commits
+- Never run `git commit` or `git push` without explicit user instruction or approval.
 - Use **Conventional Commits** with an emoji (no scope): `type: <emoji> subject`
   - Put the emoji right after `: `, keeping the `type:` prefix parseable.
   - Use this exact emoji mapping:
@@ -77,10 +86,3 @@ Multi-module monorepo with `go.work`. Each directory with its own `go.mod` is a 
 - One logical change per commit. Do not mix refactors with behavior changes.
 - Never commit directly to `main`/`master`. Work on a branch named `type/short-description` (e.g. `feat/opaque-session`, `fix/otp-expiry`).
 - Never skip hooks (`--no-verify`) unless explicitly instructed.
-
-## Conventions
-- Always plan first (outline affected files, approach, and reasoning) and wait for explicit user approval before executing tasks or writing code.
-- Run `gofmt` and `go vet` before finishing. Run tests in every module you touched.
-- New or changed adapter behavior must be covered by `adaptertest`.
-- Write table-driven tests. Use `internal/clock` instead of `time.Now()` in code under test.
-- Do not add dependencies to the core module without a clear reason.

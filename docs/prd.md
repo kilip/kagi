@@ -47,6 +47,7 @@ SMS delivery, TOTP and backup codes, JWT sessions, gorm and sqlc adapters, HTTP 
 - OAuth presets at MVP: Google and GitHub.
 - Account linking policy (see [ADR-0012](adr/0012-account-linking-policy.md)).
 - OpenAPI 3.1 HTTP contract and sentinel error mapping (see [ADR-0013](adr/0013-openapi-v3-contract.md)).
+- Session policy: lifetimes, sliding renewal, token rotation and revocation (see [ADR-0014](adr/0014-session-policy.md)).
 - Password reset is in MVP scope.
 
 ## Roadmap
@@ -66,3 +67,4 @@ See [Roadmap MVP](https://github.com/users/kilip/projects/11) (target `v0.1.0`: 
 - [ADR-0011: String IDs in domain and ports](adr/0011-string-ids.md)
 - [ADR-0012: Account linking policy](adr/0012-account-linking-policy.md)
 - [ADR-0013: OpenAPI 3.1 contract via Go comments and sentinel error mapping](adr/0013-openapi-v3-contract.md)
+- [ADR-0014: Session policy — lifetimes, sliding renewal, token rotation and revocation](adr/0014-session-policy.md)

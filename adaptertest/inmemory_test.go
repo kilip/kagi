@@ -644,3 +644,57 @@ func (s *memoryVerificationStore) DeleteExpired(ctx context.Context, batchSize i
 
 	return len(toDelete), nil
 }
+
+type memoryRateLimitStore struct {
+	mu      sync.Mutex
+	entries map[string]*kagi.RateLimitEntry
+}
+
+func newMemoryRateLimitStore() *memoryRateLimitStore {
+	return &memoryRateLimitStore{
+		entries: make(map[string]*kagi.RateLimitEntry),
+	}
+}
+
+func (s *memoryRateLimitStore) Increment(ctx context.Context, key string, window time.Duration) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+	entry, exists := s.entries[key]
+	if !exists || !entry.ExpiresAt.After(now) {
+		// Reset or initialize: count = 1, expires_at = now + window
+		s.entries[key] = &kagi.RateLimitEntry{
+			Key:       key,
+			Count:     1,
+			ExpiresAt: now.Add(window),
+		}
+		return 1, nil
+	}
+
+	// Active: increment count, preserve expires_at
+	entry.Count++
+	return entry.Count, nil
+}
+
+func (s *memoryRateLimitStore) DeleteExpired(ctx context.Context, batchSize int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+	var toDelete []string
+	for key, entry := range s.entries {
+		if !entry.ExpiresAt.After(now) {
+			toDelete = append(toDelete, key)
+			if len(toDelete) >= batchSize {
+				break
+			}
+		}
+	}
+
+	for _, key := range toDelete {
+		delete(s.entries, key)
+	}
+
+	return len(toDelete), nil
+}

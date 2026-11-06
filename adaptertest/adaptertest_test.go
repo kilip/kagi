@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/kilip/kagi"
 	"github.com/kilip/kagi/adaptertest"
@@ -98,6 +99,46 @@ func TestRunVerificationStoreTestsTB_Success(t *testing.T) {
 	verificationStore := newMemoryVerificationStore()
 	var tb testing.TB = t
 	adaptertest.RunVerificationStoreTestsTB(tb, verificationStore)
+}
+
+func TestRunRateLimitStoreTests_Success(t *testing.T) {
+	store := newMemoryRateLimitStore()
+	adaptertest.RunRateLimitStoreTests(t, store)
+}
+
+func TestRunRateLimitStoreTestsTB_Success(t *testing.T) {
+	spy := &spyTB{}
+	store := newMemoryRateLimitStore()
+	adaptertest.RunRateLimitStoreTestsTB(spy, store)
+	if spy.Failed() {
+		t.Fatalf("expected memory rate limit store to pass all tests, but spy captured failure: %v", spy.errors)
+	}
+}
+
+func TestRunAll_Success(t *testing.T) {
+	stores := adaptertest.Stores{
+		User:         newMemoryUserStore(),
+		Account:      newMemoryAccountStore(),
+		Session:      newMemorySessionStore(),
+		Verification: newMemoryVerificationStore(),
+		RateLimit:    newMemoryRateLimitStore(),
+	}
+	adaptertest.RunAll(t, stores)
+}
+
+func TestRunAllTB_Success(t *testing.T) {
+	spy := &spyTB{}
+	stores := adaptertest.Stores{
+		User:         newMemoryUserStore(),
+		Account:      newMemoryAccountStore(),
+		Session:      newMemorySessionStore(),
+		Verification: newMemoryVerificationStore(),
+		RateLimit:    newMemoryRateLimitStore(),
+	}
+	adaptertest.RunAllTB(spy, stores)
+	if spy.Failed() {
+		t.Fatalf("expected RunAllTB to pass all tests, but spy captured failure: %v", spy.errors)
+	}
 }
 
 // brokenUserStoreNoID fails to assign user.ID on Create
@@ -206,6 +247,45 @@ func TestVerificationStore_FailureCapture(t *testing.T) {
 	}
 }
 
+// brokenRateLimitStoreNoReset fails to reset counter on window expiration
+type brokenRateLimitStoreNoReset struct {
+	*memoryRateLimitStore
+}
+
+func (b *brokenRateLimitStoreNoReset) Increment(ctx context.Context, key string, window time.Duration) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	entry, exists := b.entries[key]
+	if !exists {
+		b.entries[key] = &kagi.RateLimitEntry{
+			Key:       key,
+			Count:     1,
+			ExpiresAt: time.Now().UTC().Add(window),
+		}
+		return 1, nil
+	}
+
+	// Violates expiry reset: never resets count on expiration, just keeps incrementing
+	entry.Count++
+	return entry.Count, nil
+}
+
+func TestRateLimitStore_FailureCapture(t *testing.T) {
+	spy := &spyTB{}
+	broken := &brokenRateLimitStoreNoReset{
+		memoryRateLimitStore: newMemoryRateLimitStore(),
+	}
+	adaptertest.RunRateLimitStoreTestsTB(spy, broken)
+
+	if !spy.Failed() {
+		t.Fatal("expected spy to capture test failure for broken rate limit store (missing expiry reset)")
+	}
+	if len(spy.errors) == 0 {
+		t.Fatal("expected spy to have recorded error messages")
+	}
+}
+
 func TestNilStoreGuards(t *testing.T) {
 	spy := &spyTB{}
 	adaptertest.RunUserStoreTestsTB(spy, nil)
@@ -241,5 +321,11 @@ func TestNilStoreGuards(t *testing.T) {
 	adaptertest.RunVerificationStoreTestsTB(spy6, nil)
 	if !spy6.Failed() {
 		t.Fatal("expected failure on nil VerificationStore")
+	}
+
+	spy7 := &spyTB{}
+	adaptertest.RunRateLimitStoreTestsTB(spy7, nil)
+	if !spy7.Failed() {
+		t.Fatal("expected failure on nil RateLimitStore")
 	}
 }

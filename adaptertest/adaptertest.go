@@ -162,3 +162,57 @@ func RunVerificationStoreTestsTB(tb TB, store kagi.VerificationStore) {
 	}
 	runVerificationStoreTests(tb, store)
 }
+
+// RunRateLimitStoreTests executes table-driven tests covering all RateLimitStore methods
+// and sentinel error returns against *testing.T.
+func RunRateLimitStoreTests(t *testing.T, store kagi.RateLimitStore) {
+	t.Helper()
+	RunRateLimitStoreTestsTB(t, store)
+}
+
+// RunRateLimitStoreTestsTB executes table-driven tests covering all RateLimitStore methods
+// and sentinel error returns against any TB implementation.
+func RunRateLimitStoreTestsTB(tb TB, store kagi.RateLimitStore) {
+	tb.Helper()
+	if store == nil {
+		tb.Fatal("store must not be nil")
+		return
+	}
+	runRateLimitStoreTests(tb, store)
+}
+
+// Stores bundles instances of all five primary storage ports to run the complete conformance suite.
+type Stores struct {
+	User         kagi.UserStore
+	Account      kagi.AccountStore
+	Session      kagi.SessionStore
+	Verification kagi.VerificationStore
+	RateLimit    kagi.RateLimitStore
+}
+
+// RunAll executes the complete conformance suite across all five primary storage ports against *testing.T.
+func RunAll(t *testing.T, stores Stores) {
+	t.Helper()
+	RunAllTB(t, stores)
+}
+
+// RunAllTB executes the complete conformance suite across all five primary storage ports against any TB implementation.
+func RunAllTB(tb TB, stores Stores) {
+	tb.Helper()
+
+	runSubtest(tb, "UserStore", func(tb TB) {
+		RunUserStoreTestsTB(tb, stores.User)
+	})
+	runSubtest(tb, "AccountStore", func(tb TB) {
+		RunAccountStoreTestsTB(tb, stores.Account, stores.User)
+	})
+	runSubtest(tb, "SessionStore", func(tb TB) {
+		RunSessionStoreTestsTB(tb, stores.Session, stores.User)
+	})
+	runSubtest(tb, "VerificationStore", func(tb TB) {
+		RunVerificationStoreTestsTB(tb, stores.Verification)
+	})
+	runSubtest(tb, "RateLimitStore", func(tb TB) {
+		RunRateLimitStoreTestsTB(tb, stores.RateLimit)
+	})
+}

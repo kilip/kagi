@@ -214,6 +214,93 @@ func TestSessionStore_FailureCapture(t *testing.T) {
 	}
 }
 
+// brokenSessionStoreExpiryOnRead returns expired sessions on GetByTokenHash
+type brokenSessionStoreExpiryOnRead struct {
+	*memorySessionStore
+}
+
+func (b *brokenSessionStoreExpiryOnRead) GetByTokenHash(ctx context.Context, tokenHash string) (*kagi.Session, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	sess, exists := b.sessionsByTH[tokenHash]
+	if !exists {
+		return nil, kagi.ErrSessionNotFound
+	}
+	// Deliberately violates expiry-on-read contract (ADR-0010)
+	cloned := *sess
+	return &cloned, nil
+}
+
+func TestSessionStore_ExpiryOnRead_FailureCapture(t *testing.T) {
+	spy := &spyTB{}
+	broken := &brokenSessionStoreExpiryOnRead{memorySessionStore: newMemorySessionStore()}
+	userStore := newMemoryUserStore()
+
+	adaptertest.RunSessionStoreTestsTB(spy, broken, userStore)
+
+	if !spy.Failed() {
+		t.Fatal("expected spy to capture test failure for broken session store (expiry-on-read violation)")
+	}
+	if len(spy.errors) == 0 {
+		t.Fatal("expected spy to have recorded error messages")
+	}
+}
+
+// brokenSessionStoreFailingCAS ignores oldTokenHash guard during UpdateTokenHash
+type brokenSessionStoreFailingCAS struct {
+	*memorySessionStore
+}
+
+func (b *brokenSessionStoreFailingCAS) UpdateTokenHash(ctx context.Context, id, oldTokenHash, newTokenHash string, expiresAt time.Time) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	existing, exists := b.sessionsByID[id]
+	if !exists {
+		return kagi.ErrSessionNotFound
+	}
+	// Deliberately omits existing.TokenHash != oldTokenHash CAS check!
+	delete(b.sessionsByTH, existing.TokenHash)
+	existing.TokenHash = newTokenHash
+	existing.ExpiresAt = expiresAt
+	existing.Pending2FA = false
+	b.sessionsByTH[newTokenHash] = existing
+	return nil
+}
+
+func TestSessionStore_CAS_FailureCapture(t *testing.T) {
+	spy := &spyTB{}
+	broken := &brokenSessionStoreFailingCAS{memorySessionStore: newMemorySessionStore()}
+	userStore := newMemoryUserStore()
+
+	adaptertest.RunSessionStoreTestsTB(spy, broken, userStore)
+
+	if !spy.Failed() {
+		t.Fatal("expected spy to capture test failure for broken session store (CAS violation)")
+	}
+	if len(spy.errors) == 0 {
+		t.Fatal("expected spy to have recorded error messages")
+	}
+}
+
+func TestRunAllTB_FailureCapture(t *testing.T) {
+	spy := &spyTB{}
+	stores := adaptertest.Stores{
+		User:         newMemoryUserStore(),
+		Account:      newMemoryAccountStore(),
+		Session:      &brokenSessionStoreExpiryOnRead{memorySessionStore: newMemorySessionStore()},
+		Verification: newMemoryVerificationStore(),
+		RateLimit:    newMemoryRateLimitStore(),
+	}
+	adaptertest.RunAllTB(spy, stores)
+
+	if !spy.Failed() {
+		t.Fatal("expected RunAllTB to capture failure when a component store is non-compliant")
+	}
+	if len(spy.errors) == 0 {
+		t.Fatal("expected spy to record error messages for broken store under RunAllTB")
+	}
+}
+
 // brokenVerificationStoreNoExpiry fails to enforce expiry on read in Get
 type brokenVerificationStoreNoExpiry struct {
 	*memoryVerificationStore

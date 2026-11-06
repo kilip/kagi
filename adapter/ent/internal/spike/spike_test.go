@@ -16,6 +16,7 @@ import (
 	"github.com/kilip/kagi"
 	kagientc "github.com/kilip/kagi/adapter/ent/entc"
 	"github.com/kilip/kagi/adapter/ent/internal/spike/ent"
+	"github.com/kilip/kagi/adaptertest"
 )
 
 func setupTestClient(t *testing.T) *ent.Client {
@@ -63,6 +64,10 @@ func TestEntcGeneration(t *testing.T) {
 
 func TestKagiUserStore_Conformance(t *testing.T) {
 	var _ kagi.UserStore = (*ent.KagiUserStore)(nil)
+
+	client := setupTestClient(t)
+	store := ent.NewKagiUserStore(client)
+	adaptertest.RunUserStoreTests(t, store)
 }
 
 func TestKagiUserStore_Lifecycle(t *testing.T) {

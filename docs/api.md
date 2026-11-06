@@ -632,3 +632,104 @@ err := auth.Cleanup(ctx)
 // 2. Or start an opt-in non-blocking background ticker
 auth.RunCleanup(ctx, 1*time.Hour)
 ```
+---
+
+## Conformance Testing Suite (`adaptertest`)
+
+To ensure any storage adapter—first-party (Ent, GORM, sqlc) or custom—adheres strictly to Kagi's storage contracts, Kagi provides the `adaptertest` package.
+
+All storage adapters MUST pass this test suite to guarantee cross-adapter compatibility, transactional safety, and operational correctness.
+
+### Purpose & Architecture
+
+The `adaptertest` package contains comprehensive, table-driven conformance test suites validating all 5 primary store ports:
+- `UserStore`
+- `AccountStore`
+- `SessionStore`
+- `VerificationStore`
+- `RateLimitStore`
+
+It provides test runners that accept `*testing.T` or any implementation of `adaptertest.TB` (which matches standard library `testing.TB` and allows custom failure-capturing test spies).
+
+### Key Contract Invariants Tested
+
+1. **Expiry-on-Read Contract ([ADR-0010](./adr/0010-expiry-and-cleanup.md)):**
+   - Correctness never relies on background cleanup routines.
+   - `SessionStore.GetByTokenHash` and `VerificationStore.Get` must return `ErrSessionNotFound` or `ErrVerificationNotFound` respectively when querying expired records (`expires_at <= now`).
+2. **Atomic Compare-And-Swap (CAS) & 2FA Graduation ([ADR-0014](./adr/0014-session-policy.md)):**
+   - `SessionStore.UpdateTokenHash` must atomically verify that `oldTokenHash` matches the current record and `expires_at > now`.
+   - On successful rotation, it must update `token_hash`, update `expires_at`, reset `pending_2fa = false` (graduating an intermediate 2FA session), and preserve original `created_at`.
+   - Mismatches in `oldTokenHash` or expired sessions must return `ErrSessionNotFound`.
+3. **Atomic Rate Limit Upsert & Window Reset ([ADR-0004](./adr/0004-data-model.md), [ADR-0007](./adr/0007-storage-ports-and-conformance.md)):**
+   - `RateLimitStore.Increment` must atomically initialize `count = 1` for new keys, reset `count = 1` and renew `expires_at = now + window` when expired, and increment `count` while preserving `expires_at` during active windows.
+4. **Batched Cleanup Safety ([ADR-0010](./adr/0010-expiry-and-cleanup.md)):**
+   - `DeleteExpired(ctx, batchSize)` must delete up to `batchSize` expired records (`expires_at <= now`) idempotently without table-locking active rows, returning the count of deleted rows.
+5. **Non-Nil Slice Returns & Sentinel Errors:**
+   - Empty listing queries (e.g. `AccountStore.ListByUserID`, `SessionStore.ListByUserID`) must return non-nil empty slices (`[]*T{}`), never `nil`.
+   - Missing entities must return exact sentinel errors (`ErrUserNotFound`, `ErrAccountNotFound`, `ErrSessionNotFound`, `ErrVerificationNotFound`).
+   - Duplicate unique constraints must return exact sentinel errors (`ErrEmailAlreadyExists`, `ErrAccountAlreadyExists`).
+
+### Runner Functions
+
+| Runner | Signature | Description |
+| :--- | :--- | :--- |
+| `RunAll` | `func RunAll(t *testing.T, stores Stores)` | Executes all conformance suites across all five primary store ports. |
+| `RunAllTB` | `func RunAllTB(tb TB, stores Stores)` | Executes all conformance suites against `testing.TB` or custom test double. |
+| `RunUserStoreTests` | `func RunUserStoreTests(t *testing.T, store kagi.UserStore)` | Tests `UserStore` CRUD, unique email collision, and not-found sentinels. |
+| `RunAccountStoreTests` | `func RunAccountStoreTests(t *testing.T, store kagi.AccountStore, userStore kagi.UserStore)` | Tests `AccountStore` linking, provider collision, and user cascading. |
+| `RunSessionStoreTests` | `func RunSessionStoreTests(t *testing.T, store kagi.SessionStore, userStore kagi.UserStore)` | Tests `SessionStore` opaque token lifecycle, CAS rotation, sliding expiry, and revocation. |
+| `RunVerificationStoreTests`| `func RunVerificationStoreTests(t *testing.T, store kagi.VerificationStore)` | Tests `VerificationStore` challenge lifecycle, expiry on read, and batched cleanup. |
+| `RunRateLimitStoreTests` | `func RunRateLimitStoreTests(t *testing.T, store kagi.RateLimitStore)` | Tests `RateLimitStore` atomic fixed-window upsert, window expiration reset, and cleanup. |
+
+### How Adapter Authors Integrate `adaptertest`
+
+#### 1. Complete Adapter Integration (`RunAll`)
+
+If your adapter implements all 5 primary store ports:
+
+```go
+package myadapter_test
+
+import (
+	"testing"
+
+	"github.com/kilip/kagi/adaptertest"
+	"my-module/myadapter"
+)
+
+func TestMyAdapter_Conformance(t *testing.T) {
+	db := setupTestDatabase(t)
+	adapter := myadapter.New(db)
+
+	adaptertest.RunAll(t, adaptertest.Stores{
+		User:         adapter.UserStore(),
+		Account:      adapter.AccountStore(),
+		Session:      adapter.SessionStore(),
+		Verification: adapter.VerificationStore(),
+		RateLimit:    adapter.RateLimitStore(),
+	})
+}
+```
+
+#### 2. Individual Store Runner Integration
+
+If an adapter or microservice implements individual store interfaces:
+
+```go
+package ent_test
+
+import (
+	"testing"
+
+	"github.com/kilip/kagi/adaptertest"
+	"github.com/kilip/kagi/adapter/ent/internal/spike/ent"
+)
+
+func TestKagiUserStore_Conformance(t *testing.T) {
+	client := setupTestClient(t)
+	store := ent.NewKagiUserStore(client)
+
+	// Validates full UserStore port conformance
+	adaptertest.RunUserStoreTests(t, store)
+}
+```

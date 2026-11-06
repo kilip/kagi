@@ -434,8 +434,7 @@ func testSessionStore_UpdateTokenHash(tb TB, store kagi.SessionStore, userStore 
 				current, err := store.GetByTokenHash(ctx, actualHash)
 				if err != nil {
 					tb.Fatalf("expected original session intact, got: %v", err)
-				}
-				if current.ID != sess.ID {
+				} else if current.ID != sess.ID {
 					tb.Fatalf("expected ID %q, got %q", sess.ID, current.ID)
 				}
 			},

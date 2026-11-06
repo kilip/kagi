@@ -192,6 +192,160 @@ type Config struct {
 
 ---
 
+---
+
+## Storage Ports Specification (`kagi.Store`)
+
+Kagi decouples authentication business logic from persistence technologies via 6 storage port interfaces ([ADR-0007](./adr/0007-storage-ports-and-conformance.md)). All entity IDs and foreign keys across storage ports are standard `string`s ([ADR-0011](./adr/0011-string-ids.md)).
+
+### Architectural Invariants & Port Contracts
+
+1. **Strict Dependency Isolation:** Core storage definitions (`store.go`, `secondary.go`) import exclusively from the Go standard library (`context`, `time`). Zero third-party, ORM, or database driver dependencies are permitted.
+2. **Context-First & Error-Last Signatures:** Every port method accepts `context.Context` as its initial parameter and returns `error` as its final return value.
+3. **Expiry Contract ([ADR-0010](./adr/0010-expiry-and-cleanup.md)):** Correctness of expiration never relies on background cleanup routines. All reads on time-bound entities (`SessionStore.GetByTokenHash`, `VerificationStore.Get`, `SecondaryStorage.GetSession`) verify `expires_at > now`. Expired records are treated as non-existent.
+4. **Atomicity & Concurrency Guarantees ([ADR-0014](./adr/0014-session-policy.md)):** Critical security state transitions enforce atomic execution:
+   - `SessionStore.UpdateTokenHash` uses Compare-And-Swap (CAS) to prevent race conditions during token rotation and 2FA graduation.
+   - `RateLimitStore.Increment` and `SecondaryStorage.IncrementRateLimit` enforce atomic fixed-window upsert/increment semantics.
+5. **Primary-First Multi-Tier Ordering ([ADR-0007](./adr/0007-storage-ports-and-conformance.md), [ADR-0014](./adr/0014-session-policy.md)):** When `SecondaryStorage` is configured, session mutations commit to primary `SessionStore` *first*, and cache invalidation or update occurs *second*.
+6. **Cache Fallback Semantics:** `SecondaryStorage.GetSession` returns `(nil, nil)` on cache misses (key absent or expired), allowing callers to fall back to `SessionStore.GetByTokenHash`. Operational failures return `(nil, error)`.
+7. **Deterministic Eviction:** Primary deletion methods return deleted `token_hash` values, enabling direct eviction from secondary cache without maintaining secondary user index sets in Redis.
+
+### 1. `UserStore`
+
+Primary persistence port for User identity entities ([ADR-0004](./adr/0004-data-model.md), [ADR-0011](./adr/0011-string-ids.md)).
+
+```go
+type UserStore interface {
+    Create(ctx context.Context, user *User) error
+    GetByID(ctx context.Context, id string) (*User, error)
+    GetByEmail(ctx context.Context, email string) (*User, error)
+    Update(ctx context.Context, user *User) error
+    Delete(ctx context.Context, id string) error
+}
+```
+
+- **`Create(ctx, user)`:** Inserts a new user record. Assigns generated string ID (UUID/ULID) to `user.ID`. Returns `ErrEmailAlreadyExists` if email conflicts.
+- **`GetByID(ctx, id)`:** Retrieves user by string ID. Returns `ErrUserNotFound` if missing.
+- **`GetByEmail(ctx, email)`:** Retrieves user by normalized primary email. Returns `ErrUserNotFound` if missing.
+- **`Update(ctx, user)`:** Persists updated fields (`Name`, `Email`, `EmailVerified`, `TwoFactorEnabled`, `UpdatedAt`). Returns `ErrUserNotFound` or `ErrEmailAlreadyExists`.
+- **`Delete(ctx, id)`:** Permanently removes user record. Returns `ErrUserNotFound` if missing.
+
+### 2. `AccountStore`
+
+Persistence port for authentication credentials and linked OAuth accounts ([ADR-0004](./adr/0004-data-model.md), [ADR-0012](./adr/0012-account-linking-policy.md)). Enforces unique constraint on `(provider, provider_account_id)`.
+
+```go
+type AccountStore interface {
+    Create(ctx context.Context, account *Account) error
+    GetByProvider(ctx context.Context, provider, providerAccountID string) (*Account, error)
+    ListByUserID(ctx context.Context, userID string) ([]*Account, error)
+    Update(ctx context.Context, account *Account) error
+    Delete(ctx context.Context, id string) error
+    DeleteByUserID(ctx context.Context, userID string) error
+}
+```
+
+- **`Create(ctx, account)`:** Links an authentication method to `account.UserID`. Returns `ErrAccountAlreadyExists` on provider collision.
+- **`GetByProvider(ctx, provider, providerAccountID)`:** Looks up account by provider tuple. Returns `ErrAccountNotFound` if missing.
+- **`ListByUserID(ctx, userID)`:** Returns all accounts linked to a user. Returns empty slice `[]*Account{}` if none.
+- **`Update(ctx, account)`:** Updates credentials, tokens, or profile metadata. Returns `ErrAccountNotFound`.
+- **`Delete(ctx, id)`:** Removes linked account by string ID. Returns `ErrAccountNotFound`.
+- **`DeleteByUserID(ctx, userID)`:** Cascades deletion of all accounts for a user during user account deletion.
+
+### 3. `SessionStore`
+
+Authoritative primary persistence port for opaque session state, token rotation, and revocation ([ADR-0004](./adr/0004-data-model.md), [ADR-0010](./adr/0010-expiry-and-cleanup.md), [ADR-0014](./adr/0014-session-policy.md)).
+
+```go
+type SessionStore interface {
+    Create(ctx context.Context, session *Session) error
+    GetByTokenHash(ctx context.Context, tokenHash string) (*Session, error)
+    Update(ctx context.Context, session *Session) error
+    UpdateTokenHash(ctx context.Context, id, oldTokenHash, newTokenHash string, expiresAt time.Time) error
+    DeleteByID(ctx context.Context, id string) (deletedTokenHash string, err error)
+    DeleteByTokenHash(ctx context.Context, tokenHash string) error
+    DeleteByUserID(ctx context.Context, userID string) (deletedTokenHashes []string, err error)
+    DeleteOthersByUserID(ctx context.Context, userID, currentSessionID string) (deletedTokenHashes []string, err error)
+    ListByUserID(ctx context.Context, userID string) ([]*Session, error)
+    DeleteExpired(ctx context.Context, batchSize int) (int, error)
+}
+```
+
+- **`Create(ctx, session)`:** Persists session record with SHA-256 `TokenHash`, `ExpiresAt`, and `Pending2FA`.
+- **`GetByTokenHash(ctx, tokenHash)`:** Queries active session enforcing `expires_at > now`. Returns `ErrSessionNotFound` (or `ErrSessionExpired`) if absent or expired.
+- **`Update(ctx, session)`:** Updates mutable metadata and extends `ExpiresAt` on sliding renewal while preserving original `CreatedAt`.
+- **`UpdateTokenHash(ctx, id, oldTokenHash, newTokenHash, expiresAt)`:** Executes atomic Compare-And-Swap (CAS) update: matches `id`, `oldTokenHash`, and `expires_at > now`, resets `pending_2fa = false` (2FA graduation guard), and updates `token_hash` and `expires_at`. Returns `ErrSessionNotFound` if CAS guard fails.
+- **`DeleteByID(ctx, id)`:** Deletes session and returns its `deletedTokenHash` for immediate secondary cache eviction.
+- **`DeleteByTokenHash(ctx, tokenHash)`:** Revokes session matching SHA-256 token hash.
+- **`DeleteByUserID(ctx, userID)`:** Revokes all sessions for user (SignOutAll, password reset) and returns `deletedTokenHashes` for batch cache eviction.
+- **`DeleteOthersByUserID(ctx, userID, currentSessionID)`:** Revokes all sessions except `currentSessionID` and returns `deletedTokenHashes`.
+- **`ListByUserID(ctx, userID)`:** Returns active, non-pending sessions (`expires_at > now AND pending_2fa = false`) for device management.
+- **`DeleteExpired(ctx, batchSize)`:** Idempotently deletes expired sessions (`expires_at <= now`) in bounded batches to avoid database locks. Returns deleted count.
+
+### 4. `VerificationStore`
+
+Primary persistence port for ephemeral OTP codes, email verifications, and password reset tokens ([ADR-0004](./adr/0004-data-model.md), [ADR-0005](./adr/0005-email-otp.md), [ADR-0010](./adr/0010-expiry-and-cleanup.md)).
+
+```go
+type VerificationStore interface {
+    Create(ctx context.Context, v *Verification) error
+    Get(ctx context.Context, target string, vType VerificationType) (*Verification, error)
+    Update(ctx context.Context, v *Verification) error
+    Delete(ctx context.Context, id string) error
+    DeleteExpired(ctx context.Context, batchSize int) (int, error)
+}
+```
+
+- **`Create(ctx, v)`:** Persists verification challenge storing hashed code (`CodeHash`), target, type, and expiration.
+- **`Get(ctx, target, vType)`:** Retrieves challenge enforcing `expires_at > now`. Returns `ErrVerificationNotFound` if missing or expired.
+- **`Update(ctx, v)`:** Updates mutable fields such as failed `Attempts` counter.
+- **`Delete(ctx, id)`:** Permanently removes challenge record upon consumption or invalidation.
+- **`DeleteExpired(ctx, batchSize)`:** Batched deletion of expired verification challenges (`expires_at <= now`). Returns deleted count.
+
+### 5. `RateLimitStore`
+
+Database-backed atomic rate limiting port for Redis-free deployments ([ADR-0004](./adr/0004-data-model.md), [ADR-0007](./adr/0007-storage-ports-and-conformance.md), [ADR-0010](./adr/0010-expiry-and-cleanup.md)).
+
+```go
+type RateLimitStore interface {
+    Increment(ctx context.Context, key string, window time.Duration) (count int, err error)
+    DeleteExpired(ctx context.Context, batchSize int) (int, error)
+}
+```
+
+- **`Increment(ctx, key, window)`:** Executes atomic fixed-window upsert:
+  - If key missing: inserts record with `count = 1` and `expires_at = now + window`.
+  - If expired (`expires_at <= now`): resets record with `count = 1` and `expires_at = now + window`.
+  - If active (`expires_at > now`): increments `count = count + 1` while strictly preserving original `expires_at`.
+  Returns updated `count >= 1`.
+- **`DeleteExpired(ctx, batchSize)`:** Batched deletion of expired rate limit counter entries (`expires_at <= now`). Returns deleted count.
+
+### 6. `SecondaryStorage` (Optional Fast-Tier Cache)
+
+Optional fast-tier storage port (typically Redis) for low-latency session caching and fast distributed rate limiting ([ADR-0007](./adr/0007-storage-ports-and-conformance.md), [ADR-0010](./adr/0010-expiry-and-cleanup.md), [ADR-0014](./adr/0014-session-policy.md)).
+
+```go
+type SecondaryStorage interface {
+    GetSession(ctx context.Context, tokenHash string) (*Session, error)
+    SetSession(ctx context.Context, session *Session, ttl time.Duration) error
+    DeleteSession(ctx context.Context, tokenHash string) error
+    DeleteSessions(ctx context.Context, tokenHashes []string) error
+    IncrementRateLimit(ctx context.Context, key string, window time.Duration) (count int, err error)
+}
+```
+
+- **`GetSession(ctx, tokenHash)`:**
+  - Cache Hit: returns `(*Session, nil)` for active, unexpired session (`ExpiresAt > now`).
+  - Cache Miss: returns `(nil, nil)` if key absent or expired (`ExpiresAt <= now`). Callers fall back to primary `SessionStore`.
+  - Failure: returns `(nil, error)` on network or operational failure.
+- **`SetSession(ctx, session, ttl)`:**
+  - Primary-First Ordering: called *after* primary database write commits.
+  - Active-Only Rule: only caches fully authenticated sessions (`Pending2FA == false`). Intermediate pending-2FA sessions are *never* cached.
+  - TTL: sets key TTL matching `ttl`.
+- **`DeleteSession(ctx, tokenHash)`:** Idempotently evicts cached session. Returns `nil` if key absent.
+- **`DeleteSessions(ctx, tokenHashes)`:** Bulk-evicts multiple sessions via single round-trip (e.g. Redis `DEL`). Idempotent no-op returning `nil` when `len(tokenHashes) == 0`.
+- **`IncrementRateLimit(ctx, key, window)`:** Atomically increments distributed fixed-window counter without touching the primary database. Returns updated `count >= 1`.
+
 ## Programmatic Core API (Framework-Agnostic)
 
 Kagi Core is completely decoupled from HTTP and can be invoked directly in background workers, CLI tools, or gRPC services.

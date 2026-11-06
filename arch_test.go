@@ -175,3 +175,257 @@ func TestArch_ExportedSentinelErrorsConventions(t *testing.T) {
 		t.Errorf("expected at least 30 exported sentinel errors in errors.go, found %d", exportedErrorCount)
 	}
 }
+
+// TestArch_StoragePortConventions validates ADR-0007, ADR-0010, ADR-0011, and ADR-0014:
+//  1. All 6 storage ports exist as exported interfaces in package kagi:
+//     UserStore, AccountStore, SessionStore, VerificationStore, RateLimitStore, and SecondaryStorage.
+//  2. Every port method takes context.Context as its first parameter and returns error as its final return value.
+//  3. Every port interface and exported method possesses non-empty godoc documentation.
+//  4. Contract documentation verification via AST doc comments:
+//     - Expiry checks on time-bound stores (SessionStore, VerificationStore, RateLimitStore) document "expires_at > now" or "ADR-0010".
+//     - Atomic operations (SessionStore.UpdateTokenHash, RateLimitStore.Increment, SecondaryStorage.IncrementRateLimit) document "atomic" or "CAS".
+//     - Cache miss semantics on SecondaryStorage.GetSession document "nil, nil".
+//     - Multi-tier write ordering on SecondaryStorage documents "primary".
+func TestArch_StoragePortConventions(t *testing.T) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go") && strings.HasSuffix(fi.Name(), ".go")
+	}, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parser.ParseDir failed: %v", err)
+	}
+
+	kagiPkg, exists := pkgs["kagi"]
+	if !exists {
+		t.Fatalf("package 'kagi' not found in root directory")
+	}
+
+	expectedPorts := []string{
+		"UserStore",
+		"AccountStore",
+		"SessionStore",
+		"VerificationStore",
+		"RateLimitStore",
+		"SecondaryStorage",
+	}
+
+	type portInfo struct {
+		docText string
+		iface   *ast.InterfaceType
+		file    string
+	}
+	foundPorts := make(map[string]portInfo)
+
+	for fileName, fileNode := range kagiPkg.Files {
+		relFile := filepath.Base(fileName)
+		for _, decl := range fileNode.Decls {
+			genDecl, ok := decl.(*ast.GenDecl)
+			if !ok || genDecl.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range genDecl.Specs {
+				typeSpec, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				iface, ok := typeSpec.Type.(*ast.InterfaceType)
+				if !ok {
+					continue
+				}
+
+				// Extract doc comment from GenDecl or TypeSpec
+				doc := genDecl.Doc
+				if doc == nil {
+					doc = typeSpec.Doc
+				}
+				var docText string
+				if doc != nil {
+					docText = strings.TrimSpace(doc.Text())
+				}
+
+				foundPorts[typeSpec.Name.Name] = portInfo{
+					docText: docText,
+					iface:   iface,
+					file:    relFile,
+				}
+			}
+		}
+	}
+
+	// 1. Assert all 6 ports exist and have godoc
+	for _, portName := range expectedPorts {
+		info, ok := foundPorts[portName]
+		if !ok {
+			t.Errorf("expected storage port interface %s to exist in package kagi", portName)
+			continue
+		}
+		if info.docText == "" {
+			t.Errorf("storage port interface %s in %s lacks godoc comment", portName, info.file)
+		}
+
+		// Inspect interface methods
+		methods := info.iface.Methods.List
+		if len(methods) == 0 {
+			t.Errorf("storage port interface %s has no methods defined", portName)
+		}
+
+		for _, method := range methods {
+			funcType, ok := method.Type.(*ast.FuncType)
+			if !ok {
+				// Embedded interface (if any)
+				continue
+			}
+
+			for _, methodName := range method.Names {
+				mName := methodName.Name
+
+				// 3. Every method possesses non-empty godoc
+				var methodDoc string
+				if method.Doc != nil {
+					methodDoc = strings.TrimSpace(method.Doc.Text())
+				}
+				if methodDoc == "" {
+					t.Errorf("method %s.%s in %s lacks godoc documentation", portName, mName, info.file)
+				}
+
+				// 2. First parameter MUST be context.Context
+				if funcType.Params == nil || len(funcType.Params.List) == 0 {
+					t.Errorf("method %s.%s must accept context.Context as its first parameter, but has no parameters", portName, mName)
+				} else {
+					firstParam := funcType.Params.List[0]
+					if !isContextParam(firstParam.Type) {
+						t.Errorf("method %s.%s first parameter must be context.Context", portName, mName)
+					}
+				}
+
+				// 2. Final return value MUST be error
+				if funcType.Results == nil || len(funcType.Results.List) == 0 {
+					t.Errorf("method %s.%s must return error as its final return value, but has no return values", portName, mName)
+				} else {
+					lastResult := funcType.Results.List[len(funcType.Results.List)-1]
+					if !isErrorType(lastResult.Type) {
+						t.Errorf("method %s.%s final return value must be error", portName, mName)
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Contract documentation verification
+	// Expiry checks on time-bound stores (SessionStore, VerificationStore, RateLimitStore)
+	// document "expires_at > now" or "ADR-0010".
+	timeBoundStores := []string{"SessionStore", "VerificationStore", "RateLimitStore"}
+	for _, storeName := range timeBoundStores {
+		info, ok := foundPorts[storeName]
+		if !ok {
+			continue
+		}
+		fullDoc := info.docText
+		for _, m := range info.iface.Methods.List {
+			if m.Doc != nil {
+				fullDoc += "\n" + m.Doc.Text()
+			}
+		}
+		hasExpiryKeyword := strings.Contains(fullDoc, "expires_at > now") || strings.Contains(fullDoc, "ADR-0010")
+		if !hasExpiryKeyword {
+			t.Errorf("%s contract docs must contain 'expires_at > now' or 'ADR-0010'", storeName)
+		}
+	}
+
+	// Atomic operations document "atomic" or "CAS"
+	atomicMethods := []struct {
+		port   string
+		method string
+	}{
+		{"SessionStore", "UpdateTokenHash"},
+		{"RateLimitStore", "Increment"},
+		{"SecondaryStorage", "IncrementRateLimit"},
+	}
+	for _, am := range atomicMethods {
+		info, ok := foundPorts[am.port]
+		if !ok {
+			continue
+		}
+		doc := getMethodDoc(info.iface, am.method)
+		lowerDoc := strings.ToLower(doc)
+		if !strings.Contains(lowerDoc, "atomic") && !strings.Contains(doc, "CAS") {
+			t.Errorf("method %s.%s doc must contain 'atomic' or 'CAS', got doc: %s", am.port, am.method, doc)
+		}
+	}
+
+	// Cache miss semantics on SecondaryStorage.GetSession document "nil, nil"
+	if secInfo, ok := foundPorts["SecondaryStorage"]; ok {
+		getSessionDoc := getMethodDoc(secInfo.iface, "GetSession")
+		if !strings.Contains(getSessionDoc, "nil, nil") {
+			t.Errorf("SecondaryStorage.GetSession doc must document 'nil, nil' cache miss semantics")
+		}
+
+		// Multi-tier write ordering on SecondaryStorage documents "primary"
+		fullSecDoc := secInfo.docText
+		for _, m := range secInfo.iface.Methods.List {
+			if m.Doc != nil {
+				fullSecDoc += "\n" + m.Doc.Text()
+			}
+		}
+		if !strings.Contains(strings.ToLower(fullSecDoc), "primary") {
+			t.Errorf("SecondaryStorage doc must document 'primary' write ordering")
+		}
+	}
+}
+
+// TestArch_StoragePortsImportRestrictions enforces zero third-party or adapter imports in
+// store.go and secondary.go, permitting only stdlib context and time.
+func TestArch_StoragePortsImportRestrictions(t *testing.T) {
+	fset := token.NewFileSet()
+	files := []string{"store.go", "secondary.go"}
+
+	for _, file := range files {
+		node, err := parser.ParseFile(fset, file, nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("parser.ParseFile failed for %s: %v", file, err)
+		}
+
+		for _, imp := range node.Imports {
+			importPath := strings.Trim(imp.Path.Value, `"`)
+			// Only stdlib context and time are permitted
+			if importPath != "context" && importPath != "time" {
+				t.Errorf("%s imports unauthorized package %q; storage ports may only import 'context' and 'time'",
+					file, importPath)
+			}
+		}
+	}
+}
+
+func isContextParam(expr ast.Expr) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	ident, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	return ident.Name == "context" && sel.Sel.Name == "Context"
+}
+
+func isErrorType(expr ast.Expr) bool {
+	ident, ok := expr.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	return ident.Name == "error"
+}
+
+func getMethodDoc(iface *ast.InterfaceType, methodName string) string {
+	for _, m := range iface.Methods.List {
+		for _, n := range m.Names {
+			if n.Name == methodName {
+				if m.Doc != nil {
+					return m.Doc.Text()
+				}
+				return ""
+			}
+		}
+	}
+	return ""
+}

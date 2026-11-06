@@ -396,6 +396,136 @@ func TestArch_StoragePortsImportRestrictions(t *testing.T) {
 	}
 }
 
+// TestArch_CryptoImportRestrictions enforces ADR-0001 & ADR-0002 for internal/crypto:
+// Package internal/crypto must depend exclusively on the Go standard library and
+// golang.org/x/crypto/argon2 (or subpackages under golang.org/x/crypto/).
+// It must never import adapters, ORMs, HTTP frameworks, or external third-party packages.
+func TestArch_CryptoImportRestrictions(t *testing.T) {
+	fset := token.NewFileSet()
+	cryptoDir := filepath.Join("internal", "crypto")
+
+	pkgs, err := parser.ParseDir(fset, cryptoDir, func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go") && strings.HasSuffix(fi.Name(), ".go")
+	}, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("parser.ParseDir failed for %s: %v", cryptoDir, err)
+	}
+
+	cryptoPkg, exists := pkgs["crypto"]
+	if !exists {
+		t.Fatalf("package 'crypto' not found in %s", cryptoDir)
+	}
+
+	fileCount := 0
+	for fileName, fileNode := range cryptoPkg.Files {
+		fileCount++
+		relFile := filepath.Base(fileName)
+		for _, importSpec := range fileNode.Imports {
+			importPath := strings.Trim(importSpec.Path.Value, `"`)
+
+			isStdLib := !strings.Contains(strings.Split(importPath, "/")[0], ".")
+			isGolangXCrypto := importPath == "golang.org/x/crypto" || strings.HasPrefix(importPath, "golang.org/x/crypto/")
+
+			if !isStdLib && !isGolangXCrypto {
+				t.Errorf("%s imports unauthorized external package %q; internal/crypto may only import stdlib and golang.org/x/crypto/*",
+					relFile, importPath)
+			}
+		}
+	}
+
+	if fileCount == 0 {
+		t.Errorf("no source files parsed in %s", cryptoDir)
+	}
+}
+
+// TestArch_CryptoExportedSymbolsDocComments asserts that all exported types,
+// functions, variables/errors, and constants in internal/crypto possess non-empty
+// godoc comments.
+func TestArch_CryptoExportedSymbolsDocComments(t *testing.T) {
+	fset := token.NewFileSet()
+	cryptoDir := filepath.Join("internal", "crypto")
+
+	pkgs, err := parser.ParseDir(fset, cryptoDir, func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go") && strings.HasSuffix(fi.Name(), ".go")
+	}, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parser.ParseDir failed for %s: %v", cryptoDir, err)
+	}
+
+	cryptoPkg, exists := pkgs["crypto"]
+	if !exists {
+		t.Fatalf("package 'crypto' not found in %s", cryptoDir)
+	}
+
+	exportedSymbolsCount := 0
+
+	for fileName, fileNode := range cryptoPkg.Files {
+		relFile := filepath.Base(fileName)
+		for _, decl := range fileNode.Decls {
+			switch d := decl.(type) {
+			case *ast.GenDecl:
+				switch d.Tok {
+				case token.VAR, token.CONST:
+					for _, spec := range d.Specs {
+						valSpec, ok := spec.(*ast.ValueSpec)
+						if !ok {
+							continue
+						}
+						doc := ""
+						if valSpec.Doc != nil {
+							doc = strings.TrimSpace(valSpec.Doc.Text())
+						} else if d.Doc != nil {
+							doc = strings.TrimSpace(d.Doc.Text())
+						}
+						for _, name := range valSpec.Names {
+							if name.IsExported() {
+								exportedSymbolsCount++
+								if doc == "" {
+									t.Errorf("%s: exported symbol %s lacks godoc comment", relFile, name.Name)
+								}
+							}
+						}
+					}
+				case token.TYPE:
+					for _, spec := range d.Specs {
+						typeSpec, ok := spec.(*ast.TypeSpec)
+						if !ok {
+							continue
+						}
+						if typeSpec.Name.IsExported() {
+							exportedSymbolsCount++
+							doc := ""
+							if typeSpec.Doc != nil {
+								doc = strings.TrimSpace(typeSpec.Doc.Text())
+							} else if d.Doc != nil {
+								doc = strings.TrimSpace(d.Doc.Text())
+							}
+							if doc == "" {
+								t.Errorf("%s: exported type %s lacks godoc comment", relFile, typeSpec.Name.Name)
+							}
+						}
+					}
+				}
+			case *ast.FuncDecl:
+				if d.Name.IsExported() {
+					exportedSymbolsCount++
+					doc := ""
+					if d.Doc != nil {
+						doc = strings.TrimSpace(d.Doc.Text())
+					}
+					if doc == "" {
+						t.Errorf("%s: exported func %s lacks godoc comment", relFile, d.Name.Name)
+					}
+				}
+			}
+		}
+	}
+
+	if exportedSymbolsCount == 0 {
+		t.Errorf("expected exported symbols in %s, found none", cryptoDir)
+	}
+}
+
 func isContextParam(expr ast.Expr) bool {
 	sel, ok := expr.(*ast.SelectorExpr)
 	if !ok {

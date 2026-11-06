@@ -181,10 +181,13 @@ type Config struct {
 | | `AbsoluteTimeout` | `30 * 24 * time.Hour` | Maximum lifetime ceiling from `created_at` |
 | | `RenewalThreshold`| `0.5` | Extends session only when $\le 50\%$ idle TTL remains (prevents DB write amplification) |
 | | `Pending2FATimeout`| `10 * time.Minute` | Fixed non-sliding TTL for intermediate 2FA sessions |
-| **Password** | `Memory` | `64 * 1024` (64 MB) | Argon2id memory cost |
-| | `Iterations` | `3` | Argon2id time cost |
-| | `Parallelism` | `2` | Argon2id thread count |
+| **Password** | `Memory` | `64 * 1024` (64 MB) | Argon2id memory cost in KiB |
+| | `Iterations` | `3` | Argon2id time cost (passes over memory) |
+| | `Parallelism` | `2` | Argon2id degree of parallelism (lanes/threads) |
+| | `SaltLength` | `16` | Cryptographic random salt length in bytes |
+| | `KeyLength` | `32` | Derived key length in bytes |
 | | `MinLength` | `8` | Minimum password character length |
+| | `MaxLength` | `72` | Maximum password character length |
 | **OTP** | `TTL` | `10 * time.Minute` | Email verification code validity duration |
 | | `Length` | `6` | Number of numeric digits |
 | | `MaxAttempts` | `5` | Maximum failed attempts before code invalidation |
@@ -395,6 +398,63 @@ newRawToken, session, err := auth.Sessions.Rotate(ctx, rawToken) // Preserves 30
 err = auth.Sessions.SignOutOthers(ctx, user.ID, session.ID)     // Revokes all other devices
 ```
 
+
+## Password Hashing & Cryptography (Argon2id)
+
+Kagi Core implements password hashing and verification in `internal/crypto` exclusively using **Argon2id** (via `golang.org/x/crypto/argon2`), adhering strictly to the **OWASP Password Storage Cheat Sheet** recommendations. Argon2id combines Argon2d's resistance to GPU/ASIC cracking with Argon2i's resistance to side-channel cache-timing attacks.
+
+### Default OWASP Parameters
+
+Kagi configures default parameters via `DefaultPasswordConfig()` matching OWASP recommendations for general server authentication:
+
+| Parameter | Default Value | Bounds / Enforcement | Description |
+| :--- | :--- | :--- | :--- |
+| **Memory** | `65536` KiB (64 MB) | `8 * Parallelism` KiB .. `1048576` KiB (1 GB) | Memory cost to defend against GPU/ASIC brute-force |
+| **Iterations** | `3` | `1` .. `100` (defaults to 3) | Time cost (number of sequential memory passes) |
+| **Parallelism** | `2` | `1` .. `64` | Degree of parallelism (lanes/threads) |
+| **SaltLength** | `16` bytes (128 bits) | $\ge 16$ bytes | Cryptographically secure random salt (`crypto/rand`) |
+| **KeyLength** | `32` bytes (256 bits) | $\ge 16$ bytes | Length of derived authentication key |
+
+### PHC String Wire Format
+
+Argon2id hashes are serialized into standard [Password Hashing Competition (PHC)](https://github.com/P-H-C/phc-string-format/blob/master/phc-sf-spec.md) string format:
+
+```
+$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s
+```
+
+- **`$argon2id`:** Algorithm identifier.
+- **`$v=19`:** Argon2 version (`0x13`), the current standard version supported by `golang.org/x/crypto/argon2`.
+- **`$m=%d,t=%d,p=%d`:** Comma-separated cost parameters (`m` = memory in KiB, `t` = iterations, `p` = parallelism).
+- **`$%s` (Salt):** Raw salt encoded with **unpadded standard base64** (`base64.RawStdEncoding`, RFC 4648).
+- **`$%s` (Key):** Derived key encoded with **unpadded standard base64** (`base64.RawStdEncoding`, RFC 4648).
+
+**Example PHC Hash String:**
+```
+$argon2id$v=19$m=65536,t=3,p=2$n2bYv6R5s+fQzK7X9w1A2g$U0f2o8M4j6l8V0x1Y3z5A7b9C1d3E5f7G9h1J3k5M7o
+```
+
+### Constant-Time Verification (`VerifyPassword`)
+
+Password verification defends against timing attacks, panics, and authentication bypass:
+
+1. **Strict Syntactic Validation:** Validates the 5 dollar-separated fields, algorithm name (`argon2id`), and version (`v=19`). Returns `ErrInvalidHash` or `ErrIncompatibleVersion` on mismatch.
+2. **Parameter Boundary Validation:** Enforces strict parameter limits prior to key computation. This prevents memory exhaustion Denial of Service (DoS) attacks from maliciously crafted hashes (e.g., specifying tens of gigabytes of RAM) and protects against integer overflows or crashes.
+3. **Key Derivation:** Recomputes the Argon2id key using `argon2.IDKey([]byte(password), salt, params.Iterations, params.Memory, params.Parallelism, uint32(len(key)))`.
+4. **Constant-Time Comparison:** Evaluates equality using `crypto/subtle.ConstantTimeCompare(expectedKey, actualKey) == 1`. This ensures character-by-character comparison runs in constant time, preventing side-channel timing leaks that would allow attackers to deduce valid hashes.
+
+### Parameter Migration & Rehashing (`NeedsRehash`)
+
+When security requirements increase (e.g., upgrading memory from 64 MB to 128 MB), `NeedsRehash(encodedHash, targetParams)` checks whether a stored hash matches the current application configuration. If parameters differ, Kagi rehashes the password upon next successful login without interrupting user experience.
+
+### User Enumeration Defense (`DummyHash`)
+
+To prevent user enumeration side-channel attacks during sign-in:
+
+- When a sign-in attempt targets a non-existent email, returning an immediate `ErrInvalidCredentials` reveals that the user does not exist due to the latency difference (~0.1ms vs ~50ms for Argon2id derivation).
+- Calling full `HashPassword` for non-existent users would double the CPU cost and open a Denial-of-Service vector.
+- **Solution (`DummyHash`):** `DummyHash(params)` constructs a syntactically valid Argon2id PHC string in $O(1)$ time with zero key derivation work. The authentication handler passes this dummy hash and the submitted password to `VerifyPassword`, executing the identical Argon2id key derivation and constant-time comparison path. This ensures identical response latency for existing and non-existent users without computational amplification.
+
 ---
 
 ## HTTP Wrapper Integration (`http/fiber`)
@@ -521,7 +581,7 @@ if err != nil {
 
 > [!IMPORTANT]
 > **Account Enumeration Defense**
-> - Sign-in failures always return `ErrInvalidCredentials` (HTTP 401). Kagi executes a dummy Argon2id hash when an email is not found to equalize response timing.
+> - Sign-in failures always return `ErrInvalidCredentials` (HTTP 401). When an email is not found, Kagi invokes `VerifyPassword` using `crypto.DummyHash(params)`—an $O(1)$ syntactically valid PHC string—to execute identical Argon2id key derivation and constant-time comparison, equalizing response timing and neutralizing timing side-channel enumeration.
 > - Password reset and email OTP requests return an identical generic HTTP 200 response regardless of whether the email is registered.
 
 > [!WARNING]

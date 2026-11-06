@@ -455,6 +455,34 @@ To prevent user enumeration side-channel attacks during sign-in:
 - Calling full `HashPassword` for non-existent users would double the CPU cost and open a Denial-of-Service vector.
 - **Solution (`DummyHash`):** `DummyHash(params)` constructs a syntactically valid Argon2id PHC string in $O(1)$ time with zero key derivation work. The authentication handler passes this dummy hash and the submitted password to `VerifyPassword`, executing the identical Argon2id key derivation and constant-time comparison path. This ensures identical response latency for existing and non-existent users without computational amplification.
 
+
+### Token & OTP Cryptography
+
+Kagi manages opaque session tokens, numeric one-time passwords (OTP), verification tokens, and hash verification in `internal/crypto` using standard library primitives (`crypto/rand`, `crypto/sha256`, `crypto/subtle`, `encoding/base64`, `encoding/hex`) following ADR-0003, ADR-0005, and ADR-0014:
+
+#### Opaque Session Tokens
+
+- **Entropy Generation:** Session tokens draw 32 bytes (256 bits, `TokenEntropyBytes = 32`) from `crypto/rand`.
+- **Encoding:** Formatted as unpadded Base64URL strings (`base64.RawURLEncoding`, RFC 4648 §5) yielding exactly 43 ASCII characters (`SessionTokenLength = 43`).
+- **Format Validation:** `ValidateSessionTokenFormat(token)` validates both exact length (43 characters) and valid character set (`[A-Za-z0-9-_]`), rejecting malformed tokens before database lookups.
+- **Storage Hashing:** Raw session tokens are never stored in plaintext. They are hashed using SHA-256 (`HashToken` / `HashSHA256`) and stored as 64-character lowercase hex strings (`SHA256HexLength = 64`) in `session.token_hash`.
+- **Entropy Hygiene:** Buffer memory used during generation is immediately zeroized via `zeroize([]byte)`.
+
+#### Numeric OTP Generation
+
+- **Rejection Sampling:** Implements unbiased byte rejection sampling over $b < 250$ using $b \pmod{10}$ to eliminate modulo bias across numeric digits (`0`-`9`), reading entropy from `crypto/rand`.
+- **NIST / OWASP Compliance:** Adheres to NIST SP 800-63B and OWASP ASVS guidelines with length constrained between `MinOTPLength = 6` and `MaxOTPLength = 10` digits (defaults to `DefaultOTPLength = 6`).
+- **Storage Hashing:** OTP codes are hashed via SHA-256 (`HashSHA256`) before persistence in storage models (`verification.CodeHash`).
+
+#### Verification Tokens
+
+- **Entropy & Encoding:** Verification tokens (e.g. email verification, password reset) generate 32 bytes of cryptographically secure entropy (`TokenEntropyBytes = 32`) encoded as 43-character unpadded Base64URL strings (`GenerateVerificationToken`).
+- **Storage Hashing:** Hashed via SHA-256 (`HashSHA256`) and stored in `verification.CodeHash` to protect against token leakage via database compromise.
+
+#### Constant-Time Verification
+
+- **Side-Channel Defense:** `ConstantTimeCompare(a, b)` wraps `crypto/subtle.ConstantTimeCompare([]byte(a), []byte(b))` to evaluate strings in constant time relative to input length, preventing side-channel timing attacks on hash lookups.
+- **Helper:** `VerifyHash(data, expectedHash)` hashes incoming data with SHA-256 and compares it against `expectedHash` using constant-time evaluation.
 ---
 
 ## HTTP Wrapper Integration (`http/fiber`)

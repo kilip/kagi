@@ -315,21 +315,33 @@ if err != nil {
 | `ErrEmailUnverified` | Email verification required | `403 Forbidden` | `email_unverified` |
 | `ErrPasswordTooWeak` | Password complexity failure | `400 Bad Request` | `password_too_weak` |
 | `ErrAccountDisabled` | Account suspended or disabled | `403 Forbidden` | `account_disabled` |
+| `ErrAccountNotFound` | Target account link does not exist | `404 Not Found` | `account_not_found` |
+| `ErrAccountAlreadyExists` | Provider account already linked | `409 Conflict` | `account_already_exists` |
+| `ErrCannotUnlinkLastMethod`| Attempt to unlink sole login account | `400 Bad Request` | `cannot_unlink_last_method` |
 | `ErrInvalidSessionToken` | Malformed token (length != 43) | `401 Unauthorized` | `invalid_session` |
 | `ErrSessionNotFound` | Session does not exist in store | `401 Unauthorized` | `session_not_found` |
 | `ErrSessionExpired` | Session read-check failed | `401 Unauthorized` | `session_expired` |
 | `ErrSessionPending2FA` | Access attempted on pending-2FA session | `403 Forbidden` | `session_pending_2fa` |
+| `ErrVerificationNotFound` | Verification record not found | `400 Bad Request` | `verification_not_found` |
 | `ErrOTPNotFound` | Verification code not found | `400 Bad Request` | `otp_not_found` |
 | `ErrOTPExpired` | OTP TTL has elapsed | `400 Bad Request` | `otp_expired` |
 | `ErrOTPInvalid` | Mismatched code hash | `400 Bad Request` | `invalid_otp` |
 | `ErrOTPMaxAttemptsExceeded`| Attempt limit reached; code purged | `429 Too Many Requests` | `otp_attempts_exceeded`|
 | `ErrOTPCooldown` | Resend cooldown active | `429 Too Many Requests` | `otp_cooldown_active` |
+| `ErrOAuthStateMissing` | OAuth callback missing state parameter | `400 Bad Request` | `oauth_state_missing` |
 | `ErrOAuthStateMismatch` | State or PKCE verification failed | `400 Bad Request` | `oauth_state_mismatch` |
 | `ErrOAuthStateExpired` | OAuth transient cookie expired | `400 Bad Request` | `oauth_state_expired` |
+| `ErrOAuthProviderMismatch` | OAuth callback provider mismatch | `400 Bad Request` | `oauth_provider_mismatch` |
+| `ErrOAuthRemoteError` | Remote identity provider error | `400 Bad Request` | `oauth_remote_error` |
 | `ErrOAuthEmailUnverified`| Provider email is not verified | `400 Bad Request` | `oauth_email_unverified`|
-| `ErrCannotUnlinkLastMethod`| Attempt to unlink sole login account | `400 Bad Request` | `cannot_unlink_last_method` |
+| `ErrCSRFTokenMissing` | CSRF token missing from request | `403 Forbidden` | `csrf_token_missing` |
+| `ErrCSRFTokenInvalid` | CSRF token HMAC verification failed | `403 Forbidden` | `csrf_token_invalid` |
 | `ErrCSRFTokenMismatch` | Missing or mismatched CSRF token | `403 Forbidden` | `csrf_token_mismatch` |
 | `ErrRateLimitExceeded` | Rate limit threshold exceeded | `429 Too Many Requests` | `rate_limit_exceeded` |
+| `ErrNilStore` | Required storage port is nil | Startup Error | - |
+| `ErrWeakMasterSecret` | Master secret entropy < 32 bytes | Startup Error | - |
+| `ErrInvalidConfig` | Invalid configuration parameters | Startup Error | - |
+| `ErrInternal` | Internal authentication error | `500 Internal Server Error` | `internal_error` |
 
 ---
 

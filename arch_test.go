@@ -1,6 +1,7 @@
 package kagi_test
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -119,5 +120,58 @@ func TestArch_ZeroAdapterOrThirdPartyImportsInCore(t *testing.T) {
 					relFile, importPath)
 			}
 		}
+	}
+}
+
+// TestArch_ExportedSentinelErrorsConventions asserts that:
+// 1. All exported package-level variables in errors.go follow Go naming conventions (start with Err).
+// 2. All exported variables in errors.go possess a non-empty godoc comment.
+// 3. At least 30 sentinel errors are defined and checked.
+func TestArch_ExportedSentinelErrorsConventions(t *testing.T) {
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, "errors.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parser.ParseFile failed for errors.go: %v", err)
+	}
+
+	exportedErrorCount := 0
+	for _, decl := range node.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
+		if !ok || genDecl.Tok != token.VAR {
+			continue
+		}
+
+		for _, spec := range genDecl.Specs {
+			valSpec, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+
+			for _, name := range valSpec.Names {
+				if !name.IsExported() {
+					continue
+				}
+
+				exportedErrorCount++
+
+				// Convention 1: All exported error variables must start with "Err"
+				if !strings.HasPrefix(name.Name, "Err") {
+					t.Errorf("exported variable %s in errors.go does not follow 'Err' naming prefix convention", name.Name)
+				}
+
+				// Convention 2: Each exported error variable must have godoc
+				var docText string
+				if valSpec.Doc != nil {
+					docText = strings.TrimSpace(valSpec.Doc.Text())
+				}
+				if docText == "" {
+					t.Errorf("exported error %s in errors.go lacks godoc comment", name.Name)
+				}
+			}
+		}
+	}
+
+	if exportedErrorCount < 30 {
+		t.Errorf("expected at least 30 exported sentinel errors in errors.go, found %d", exportedErrorCount)
 	}
 }

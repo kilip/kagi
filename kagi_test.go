@@ -146,6 +146,53 @@ func TestNew_ClockInjection(t *testing.T) {
 	}
 }
 
+func TestNew_FakeClockIntegration(t *testing.T) {
+	validSecret := "a-very-long-master-secret-at-least-32-bytes-long"
+	initialTime := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	fakeClock := clock.NewFake(initialTime)
+
+	cfg := kagi.Config{
+		UserStore:         &mockUserStore{},
+		AccountStore:      &mockAccountStore{},
+		SessionStore:      &mockSessionStore{},
+		VerificationStore: &mockVerificationStore{},
+		RateLimitStore:    &mockRateLimitStore{},
+		Secret:            validSecret,
+		Clock:             fakeClock,
+	}
+
+	instance, err := kagi.New(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if instance == nil {
+		t.Fatal("expected non-nil Kagi instance")
+	}
+
+	// Verify FakeClock is injected and starts at initial time
+	if !cfg.Clock.Now().Equal(initialTime) {
+		t.Fatalf("expected clock to be %v, got %v", initialTime, cfg.Clock.Now())
+	}
+
+	// Verify advancing time deterministically through the injected FakeClock
+	advanceDuration := 45 * time.Minute
+	fakeClock.Advance(advanceDuration)
+
+	expectedTime := initialTime.Add(advanceDuration)
+	if !cfg.Clock.Now().Equal(expectedTime) {
+		t.Fatalf("expected clock to advance to %v, got %v", expectedTime, cfg.Clock.Now())
+	}
+
+	if elapsed := cfg.Clock.Since(initialTime); elapsed != advanceDuration {
+		t.Fatalf("expected elapsed duration %v, got %v", advanceDuration, elapsed)
+	}
+
+	futureTarget := expectedTime.Add(15 * time.Minute)
+	if remaining := cfg.Clock.Until(futureTarget); remaining != 15*time.Minute {
+		t.Fatalf("expected remaining duration %v, got %v", 15*time.Minute, remaining)
+	}
+}
+
 type cleanupTrackingSessionStore struct {
 	mockSessionStore
 	deletedCount int

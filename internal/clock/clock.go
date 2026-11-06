@@ -22,6 +22,8 @@ type Clock interface {
 // to real-world system wall-clock operations.
 type RealClock struct{}
 
+var _ Clock = RealClock{}
+
 // Now returns the current local time using time.Now.
 func (RealClock) Now() time.Time {
 	return time.Now()

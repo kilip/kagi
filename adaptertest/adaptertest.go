@@ -2,6 +2,7 @@ package adaptertest
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"sync/atomic"
@@ -43,8 +44,8 @@ type customSubtestRunner interface {
 // subtest runner interfaces, or sequentially if tb is another TB implementation.
 func runSubtest(tb TB, name string, f func(tb TB)) bool {
 	tb.Helper()
-	if runner, ok := tb.(customSubtestRunner); ok {
-		return runner.Run(name, f)
+	if custom, ok := tb.(customSubtestRunner); ok {
+		return custom.Run(name, f)
 	}
 	if runner, ok := tb.(subtestRunner); ok {
 		return runner.Run(name, func(t *testing.T) {
@@ -71,6 +72,15 @@ func uniqueID(prefix string) string {
 // uniqueEmail generates a unique email address with the given prefix.
 func uniqueEmail(prefix string) string {
 	return fmt.Sprintf("%s@example.com", uniqueID(prefix))
+}
+
+// uniqueTokenHash generates a 64-character lowercase hex SHA-256 token hash (ADR-0014).
+func uniqueTokenHash(prefix string) string {
+	seq := atomic.AddUint64(&fixtureSeq, 1)
+	var b [32]byte
+	_, _ = rand.Read(b[:])
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%x", prefix, seq, b)))
+	return hex.EncodeToString(h[:])
 }
 
 // RunUserStoreTests executes table-driven tests covering all UserStore methods
@@ -111,4 +121,44 @@ func RunAccountStoreTestsTB(tb TB, store kagi.AccountStore, userStore kagi.UserS
 		return
 	}
 	runAccountStoreTests(tb, store, userStore)
+}
+
+// RunSessionStoreTests executes table-driven tests covering all SessionStore methods
+// and sentinel error returns against *testing.T.
+func RunSessionStoreTests(t *testing.T, store kagi.SessionStore, userStore kagi.UserStore) {
+	t.Helper()
+	RunSessionStoreTestsTB(t, store, userStore)
+}
+
+// RunSessionStoreTestsTB executes table-driven tests covering all SessionStore methods
+// and sentinel error returns against any TB implementation.
+func RunSessionStoreTestsTB(tb TB, store kagi.SessionStore, userStore kagi.UserStore) {
+	tb.Helper()
+	if store == nil {
+		tb.Fatal("store must not be nil")
+		return
+	}
+	if userStore == nil {
+		tb.Fatal("userStore must not be nil")
+		return
+	}
+	runSessionStoreTests(tb, store, userStore)
+}
+
+// RunVerificationStoreTests executes table-driven tests covering all VerificationStore methods
+// and sentinel error returns against *testing.T.
+func RunVerificationStoreTests(t *testing.T, store kagi.VerificationStore) {
+	t.Helper()
+	RunVerificationStoreTestsTB(t, store)
+}
+
+// RunVerificationStoreTestsTB executes table-driven tests covering all VerificationStore methods
+// and sentinel error returns against any TB implementation.
+func RunVerificationStoreTestsTB(tb TB, store kagi.VerificationStore) {
+	tb.Helper()
+	if store == nil {
+		tb.Fatal("store must not be nil")
+		return
+	}
+	runVerificationStoreTests(tb, store)
 }

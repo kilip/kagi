@@ -10,9 +10,9 @@ import (
 )
 
 type spyTB struct {
-	failed   bool
 	errors   []string
 	messages []string
+	failed   bool
 }
 
 func (s *spyTB) Cleanup(f func()) {}
@@ -76,6 +76,30 @@ func TestRunAccountStoreTestsTB_Success(t *testing.T) {
 	adaptertest.RunAccountStoreTestsTB(tb, accountStore, userStore)
 }
 
+func TestRunSessionStoreTests_Success(t *testing.T) {
+	userStore := newMemoryUserStore()
+	sessionStore := newMemorySessionStore()
+	adaptertest.RunSessionStoreTests(t, sessionStore, userStore)
+}
+
+func TestRunSessionStoreTestsTB_Success(t *testing.T) {
+	userStore := newMemoryUserStore()
+	sessionStore := newMemorySessionStore()
+	var tb testing.TB = t
+	adaptertest.RunSessionStoreTestsTB(tb, sessionStore, userStore)
+}
+
+func TestRunVerificationStoreTests_Success(t *testing.T) {
+	verificationStore := newMemoryVerificationStore()
+	adaptertest.RunVerificationStoreTests(t, verificationStore)
+}
+
+func TestRunVerificationStoreTestsTB_Success(t *testing.T) {
+	verificationStore := newMemoryVerificationStore()
+	var tb testing.TB = t
+	adaptertest.RunVerificationStoreTestsTB(tb, verificationStore)
+}
+
 // brokenUserStoreNoID fails to assign user.ID on Create
 type brokenUserStoreNoID struct {
 	*memoryUserStore
@@ -125,6 +149,63 @@ func TestAccountStore_FailureCapture(t *testing.T) {
 	}
 }
 
+// brokenSessionStoreNilSlice returns nil instead of []*Session{} on ListByUserID
+type brokenSessionStoreNilSlice struct {
+	*memorySessionStore
+}
+
+func (b *brokenSessionStoreNilSlice) ListByUserID(ctx context.Context, userID string) ([]*kagi.Session, error) {
+	return nil, nil // deliberately violate non-nil empty slice contract
+}
+
+func TestSessionStore_FailureCapture(t *testing.T) {
+	spy := &spyTB{}
+	broken := &brokenSessionStoreNilSlice{memorySessionStore: newMemorySessionStore()}
+	userStore := newMemoryUserStore()
+
+	adaptertest.RunSessionStoreTestsTB(spy, broken, userStore)
+
+	if !spy.Failed() {
+		t.Fatal("expected spy to capture test failure for broken session store (nil slice)")
+	}
+	if len(spy.errors) == 0 {
+		t.Fatal("expected spy to have recorded error messages")
+	}
+}
+
+// brokenVerificationStoreNoExpiry fails to enforce expiry on read in Get
+type brokenVerificationStoreNoExpiry struct {
+	*memoryVerificationStore
+}
+
+func (b *brokenVerificationStoreNoExpiry) Get(ctx context.Context, target string, vType kagi.VerificationType) (*kagi.Verification, error) {
+	// Deliberately bypass expiry check
+	key := target + ":" + string(vType)
+	b.memoryVerificationStore.mu.RLock()
+	defer b.memoryVerificationStore.mu.RUnlock()
+
+	v, exists := b.memoryVerificationStore.recordsByKey[key]
+	if !exists {
+		return nil, kagi.ErrVerificationNotFound
+	}
+	cloned := *v
+	return &cloned, nil
+}
+
+func TestVerificationStore_FailureCapture(t *testing.T) {
+	spy := &spyTB{}
+	broken := &brokenVerificationStoreNoExpiry{memoryVerificationStore: newMemoryVerificationStore()}
+
+	adaptertest.RunVerificationStoreTestsTB(spy, broken)
+
+	if !spy.Failed() {
+		t.Fatal("expected spy to capture test failure for broken verification store (expiry violation)")
+	}
+	if len(spy.errors) == 0 {
+		t.Fatal("expected spy to have recorded error messages")
+	}
+}
+
 func TestNilStoreGuards(t *testing.T) {
 	spy := &spyTB{}
 	adaptertest.RunUserStoreTestsTB(spy, nil)
@@ -142,5 +223,23 @@ func TestNilStoreGuards(t *testing.T) {
 	adaptertest.RunAccountStoreTestsTB(spy3, newMemoryAccountStore(), nil)
 	if !spy3.Failed() {
 		t.Fatal("expected failure on nil userStore for AccountStore")
+	}
+
+	spy4 := &spyTB{}
+	adaptertest.RunSessionStoreTestsTB(spy4, nil, newMemoryUserStore())
+	if !spy4.Failed() {
+		t.Fatal("expected failure on nil SessionStore")
+	}
+
+	spy5 := &spyTB{}
+	adaptertest.RunSessionStoreTestsTB(spy5, newMemorySessionStore(), nil)
+	if !spy5.Failed() {
+		t.Fatal("expected failure on nil userStore for SessionStore")
+	}
+
+	spy6 := &spyTB{}
+	adaptertest.RunVerificationStoreTestsTB(spy6, nil)
+	if !spy6.Failed() {
+		t.Fatal("expected failure on nil VerificationStore")
 	}
 }

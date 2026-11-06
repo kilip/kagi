@@ -44,13 +44,15 @@ var (
 	ErrInvalidOTPLength = errors.New("crypto: invalid OTP length")
 )
 
+var randRead = rand.Read
+
 // GenerateRandomBytes reads n cryptographically secure random bytes from crypto/rand.
 func GenerateRandomBytes(n int) ([]byte, error) {
 	if n < 0 {
 		return nil, errors.New("crypto: negative byte count")
 	}
 	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
+	if _, err := randRead(b); err != nil {
 		return nil, fmt.Errorf("crypto: failed to read random bytes: %w", err)
 	}
 	return b, nil
@@ -115,14 +117,12 @@ func GenerateOTP(length int) (string, error) {
 
 	var digits [MaxOTPLength]byte
 	var buf [32]byte
-	defer func() {
-		zeroize(digits[:])
-		zeroize(buf[:])
-	}()
+	defer zeroize(digits[:])
+	defer zeroize(buf[:])
 
 	count := 0
 	for count < length {
-		if _, err := rand.Read(buf[:]); err != nil {
+		if _, err := randRead(buf[:]); err != nil {
 			return "", fmt.Errorf("crypto: failed to read random bytes: %w", err)
 		}
 		for _, b := range buf {

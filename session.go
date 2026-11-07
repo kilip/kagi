@@ -236,7 +236,78 @@ func (s *SessionService) Validate(ctx context.Context, rawToken string) (*Sessio
 
 // Rotate generates a new 256-bit opaque token while preserving CreatedAt (AbsoluteTimeout ceiling).
 func (s *SessionService) Rotate(ctx context.Context, rawToken string) (string, *Session, error) {
-	return "", nil, nil
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
+
+	if err := crypto.ValidateSessionTokenFormat(rawToken); err != nil {
+		return "", nil, ErrInvalidSessionToken
+	}
+
+	oldHash := crypto.HashToken(rawToken)
+
+	sess, err := s.store.GetByTokenHash(ctx, oldHash)
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrSessionExpired) {
+			return "", nil, ErrSessionNotFound
+		}
+		return "", nil, err
+	}
+	if sess == nil {
+		return "", nil, ErrSessionNotFound
+	}
+
+	if !crypto.ConstantTimeCompare(sess.TokenHash, oldHash) {
+		return "", nil, ErrSessionNotFound
+	}
+
+	if sess.Pending2FA {
+		return "", nil, ErrSessionPending2FA
+	}
+
+	now := s.clock.Now().UTC()
+	if !sess.ExpiresAt.After(now) {
+		return "", nil, ErrSessionNotFound
+	}
+
+	newRawToken, err := crypto.GenerateSessionToken()
+	if err != nil {
+		return "", nil, err
+	}
+	newHash := crypto.HashToken(newRawToken)
+
+	newExpiresAt := now.Add(s.config.IdleTimeout)
+	absMax := sess.CreatedAt.Add(s.config.AbsoluteTimeout)
+	if newExpiresAt.After(absMax) {
+		newExpiresAt = absMax
+	}
+	if !newExpiresAt.After(now) {
+		return "", nil, ErrSessionNotFound
+	}
+
+	if err := s.store.UpdateTokenHash(ctx, sess.ID, oldHash, newHash, newExpiresAt); err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrSessionExpired) {
+			return "", nil, ErrSessionNotFound
+		}
+		return "", nil, err
+	}
+
+	sess.TokenHash = newHash
+	sess.ExpiresAt = newExpiresAt
+	sess.Pending2FA = false
+	sess.UpdatedAt = now
+
+	if s.secondary != nil {
+		if err := s.secondary.DeleteSession(ctx, oldHash); err != nil {
+			return "", nil, err
+		}
+		ttl := newExpiresAt.Sub(now)
+		if err := s.secondary.SetSession(ctx, sess, ttl); err != nil {
+			return "", nil, err
+		}
+	}
+
+	return newRawToken, sess, nil
 }
 
 // SignOut revokes the session matching rawToken and evicts it from SecondaryStorage.

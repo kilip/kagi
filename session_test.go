@@ -1083,3 +1083,718 @@ func TestValidate(t *testing.T) {
 		}
 	})
 }
+func TestSessionService_Rotate(t *testing.T) {
+	t.Parallel()
+
+	fixedTime := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+
+	t.Run("context cancellation returns context error", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		token, sess, err := svc.Rotate(ctx, "any-token")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session on context error")
+		}
+	})
+
+	t.Run("invalid token format returns ErrInvalidSessionToken", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		invalidTokens := []string{
+			"",
+			"short",
+			"invalid-length-token-that-is-way-too-long-for-a-standard-43-character-session-token",
+			"contains!invalid*chars!which#fail#base64url",
+		}
+
+		for _, tok := range invalidTokens {
+			token, sess, err := svc.Rotate(context.Background(), tok)
+			if !errors.Is(err, kagi.ErrInvalidSessionToken) {
+				t.Errorf("token %q: expected ErrInvalidSessionToken, got %v", tok, err)
+			}
+			if token != "" || sess != nil {
+				t.Errorf("token %q: expected empty token and nil session", tok)
+			}
+		}
+	})
+
+	t.Run("session not found in store returns ErrSessionNotFound", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(nil, kagi.ErrSessionNotFound).Times(1)
+
+		token, sess, err := svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session")
+		}
+	})
+
+	t.Run("session expired error in store returns ErrSessionNotFound", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(nil, kagi.ErrSessionExpired).Times(1)
+
+		token, sess, err := svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session")
+		}
+	})
+
+	t.Run("store returning nil session and nil error returns ErrSessionNotFound", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(nil, nil).Times(1)
+
+		token, sess, err := svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session")
+		}
+	})
+
+	t.Run("database failure on GetByTokenHash propagates", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		dbErr := errors.New("db connection failure")
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(nil, dbErr).Times(1)
+
+		token, sess, err := svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, dbErr) {
+			t.Fatalf("expected dbErr, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session")
+		}
+	})
+
+	t.Run("hash mismatch returns ErrSessionNotFound", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		mismatchedSession := &kagi.Session{
+			ID:        "sess-mismatch",
+			UserID:    "user-mismatch",
+			TokenHash: "different-token-hash-that-does-not-match-oldHash",
+			ExpiresAt: fixedTime.Add(24 * time.Hour),
+			CreatedAt: fixedTime.Add(-1 * time.Hour),
+		}
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(mismatchedSession, nil).Times(1)
+
+		token, sess, err := svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session")
+		}
+	})
+
+	t.Run("pending 2FA session returns ErrSessionPending2FA", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		pendingSession := &kagi.Session{
+			ID:         "sess-pending",
+			UserID:     "user-pending",
+			TokenHash:  tokenHash,
+			ExpiresAt:  fixedTime.Add(10 * time.Minute),
+			CreatedAt:  fixedTime,
+			Pending2FA: true,
+		}
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(pendingSession, nil).Times(1)
+
+		token, sess, err := svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionPending2FA) {
+			t.Fatalf("expected ErrSessionPending2FA, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session")
+		}
+	})
+
+	t.Run("expired session on read returns ErrSessionNotFound", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		expiredSession := &kagi.Session{
+			ID:        "sess-expired",
+			UserID:    "user-expired",
+			TokenHash: tokenHash,
+			ExpiresAt: fixedTime.Add(-1 * time.Second),
+			CreatedAt: fixedTime.Add(-2 * time.Hour),
+		}
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(expiredSession, nil).Times(1)
+
+		token, sess, err := svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session")
+		}
+	})
+
+	t.Run("session whose absolute timeout has elapsed returns ErrSessionNotFound", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		cfg := kagi.DefaultSessionConfig()
+		svc := kagi.NewSessionService(mockStore, nil, cfg, clock.NewFake(fixedTime))
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		// Created 31 days ago (exceeding 30-day absolute timeout)
+		createdAt := fixedTime.Add(-31 * 24 * time.Hour)
+		sessionExceededAbs := &kagi.Session{
+			ID:        "sess-abs-exceeded",
+			UserID:    "user-abs-exceeded",
+			TokenHash: tokenHash,
+			ExpiresAt: fixedTime.Add(1 * time.Hour), // artificially unexpired
+			CreatedAt: createdAt,
+		}
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(sessionExceededAbs, nil).Times(1)
+
+		token, sess, err := svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session")
+		}
+	})
+
+	t.Run("successful rotation without secondary cache", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		cfg := kagi.DefaultSessionConfig()
+		fakeClk := clock.NewFake(fixedTime)
+		svc := kagi.NewSessionService(mockStore, nil, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		oldHash := crypto.HashToken(rawToken)
+		createdAt := fixedTime.Add(-2 * 24 * time.Hour)
+
+		existingSession := &kagi.Session{
+			ID:        "sess-rot-1",
+			UserID:    "user-rot-1",
+			TokenHash: oldHash,
+			ExpiresAt: fixedTime.Add(5 * 24 * time.Hour),
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt,
+			IPAddress: "192.168.1.1",
+			UserAgent: "TestBrowser/1.0",
+		}
+
+		expectedNewExpiresAt := fixedTime.Add(cfg.IdleTimeout)
+
+		var capturedNewHash string
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), oldHash).Return(existingSession, nil).Times(1)
+		mockStore.EXPECT().UpdateTokenHash(gomock.Any(), "sess-rot-1", oldHash, gomock.Any(), expectedNewExpiresAt).
+			DoAndReturn(func(_ context.Context, id, oHash, nHash string, exp time.Time) error {
+				capturedNewHash = nHash
+				return nil
+			}).Times(1)
+
+		newRawToken, updatedSess, err := svc.Rotate(context.Background(), rawToken)
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+
+		if len(newRawToken) != 43 {
+			t.Fatalf("expected 43-character token, got length %d (%q)", len(newRawToken), newRawToken)
+		}
+		if err := crypto.ValidateSessionTokenFormat(newRawToken); err != nil {
+			t.Fatalf("expected valid token format: %v", err)
+		}
+		if newRawToken == rawToken {
+			t.Fatalf("expected new token to differ from old token")
+		}
+
+		newHash := crypto.HashToken(newRawToken)
+		if capturedNewHash != newHash {
+			t.Fatalf("captured hash %q does not match hash of returned token %q", capturedNewHash, newHash)
+		}
+
+		if updatedSess.TokenHash != newHash {
+			t.Errorf("expected session.TokenHash == %q, got %q", newHash, updatedSess.TokenHash)
+		}
+		if !updatedSess.ExpiresAt.Equal(expectedNewExpiresAt) {
+			t.Errorf("expected session.ExpiresAt == %v, got %v", expectedNewExpiresAt, updatedSess.ExpiresAt)
+		}
+		if !updatedSess.CreatedAt.Equal(createdAt) {
+			t.Errorf("expected session.CreatedAt preserved as %v, got %v", createdAt, updatedSess.CreatedAt)
+		}
+		if updatedSess.Pending2FA {
+			t.Errorf("expected session.Pending2FA == false")
+		}
+		if !updatedSess.UpdatedAt.Equal(fixedTime) {
+			t.Errorf("expected session.UpdatedAt == %v, got %v", fixedTime, updatedSess.UpdatedAt)
+		}
+		if updatedSess.IPAddress != "192.168.1.1" || updatedSess.UserAgent != "TestBrowser/1.0" {
+			t.Errorf("expected metadata preserved")
+		}
+	})
+
+	t.Run("successful rotation with secondary storage eviction and caching", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		cfg := kagi.DefaultSessionConfig()
+		fakeClk := clock.NewFake(fixedTime)
+		svc := kagi.NewSessionService(mockStore, mockSec, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		oldHash := crypto.HashToken(rawToken)
+		createdAt := fixedTime.Add(-1 * 24 * time.Hour)
+
+		existingSession := &kagi.Session{
+			ID:        "sess-rot-sec",
+			UserID:    "user-rot-sec",
+			TokenHash: oldHash,
+			ExpiresAt: fixedTime.Add(6 * 24 * time.Hour),
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt,
+		}
+
+		expectedNewExpiresAt := fixedTime.Add(cfg.IdleTimeout)
+		expectedTTL := cfg.IdleTimeout
+
+		var capturedNewHash string
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), oldHash).Return(existingSession, nil).Times(1)
+		mockStore.EXPECT().UpdateTokenHash(gomock.Any(), "sess-rot-sec", oldHash, gomock.Any(), expectedNewExpiresAt).
+			DoAndReturn(func(_ context.Context, id, oHash, nHash string, exp time.Time) error {
+				capturedNewHash = nHash
+				return nil
+			}).Times(1)
+
+		mockSec.EXPECT().DeleteSession(gomock.Any(), oldHash).Return(nil).Times(1)
+		mockSec.EXPECT().SetSession(gomock.Any(), gomock.AssignableToTypeOf(&kagi.Session{}), expectedTTL).
+			DoAndReturn(func(_ context.Context, s *kagi.Session, ttl time.Duration) error {
+				if s.TokenHash != capturedNewHash {
+					t.Errorf("expected cached session to have new hash %q, got %q", capturedNewHash, s.TokenHash)
+				}
+				if ttl != expectedTTL {
+					t.Errorf("expected ttl %v, got %v", expectedTTL, ttl)
+				}
+				return nil
+			}).Times(1)
+
+		newRawToken, updatedSess, err := svc.Rotate(context.Background(), rawToken)
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if newRawToken == rawToken {
+			t.Fatalf("expected new token")
+		}
+		if updatedSess.TokenHash != capturedNewHash {
+			t.Fatalf("expected updatedSess.TokenHash == %q", capturedNewHash)
+		}
+	})
+
+	t.Run("secondary storage DeleteSession failure returns error", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		cfg := kagi.DefaultSessionConfig()
+		fakeClk := clock.NewFake(fixedTime)
+		svc := kagi.NewSessionService(mockStore, mockSec, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		oldHash := crypto.HashToken(rawToken)
+
+		existingSession := &kagi.Session{
+			ID:        "sess-del-fail",
+			UserID:    "user-del-fail",
+			TokenHash: oldHash,
+			ExpiresAt: fixedTime.Add(6 * 24 * time.Hour),
+			CreatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+			UpdatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+		}
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), oldHash).Return(existingSession, nil).Times(1)
+		mockStore.EXPECT().UpdateTokenHash(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).Times(1)
+
+		secErr := errors.New("redis delete failed")
+		mockSec.EXPECT().DeleteSession(gomock.Any(), oldHash).Return(secErr).Times(1)
+
+		token, sess, err := svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, secErr) {
+			t.Fatalf("expected secErr, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session")
+		}
+	})
+
+	t.Run("secondary storage SetSession failure returns error", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		cfg := kagi.DefaultSessionConfig()
+		fakeClk := clock.NewFake(fixedTime)
+		svc := kagi.NewSessionService(mockStore, mockSec, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		oldHash := crypto.HashToken(rawToken)
+
+		existingSession := &kagi.Session{
+			ID:        "sess-set-fail",
+			UserID:    "user-set-fail",
+			TokenHash: oldHash,
+			ExpiresAt: fixedTime.Add(6 * 24 * time.Hour),
+			CreatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+			UpdatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+		}
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), oldHash).Return(existingSession, nil).Times(1)
+		mockStore.EXPECT().UpdateTokenHash(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).Times(1)
+		mockSec.EXPECT().DeleteSession(gomock.Any(), oldHash).Return(nil).Times(1)
+
+		secErr := errors.New("redis set failed")
+		mockSec.EXPECT().SetSession(gomock.Any(), gomock.Any(), gomock.Any()).Return(secErr).Times(1)
+
+		token, sess, err := svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, secErr) {
+			t.Fatalf("expected secErr, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session")
+		}
+	})
+
+	t.Run("strictly clamps new expiration to CreatedAt + AbsoluteTimeout", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		cfg := kagi.DefaultSessionConfig() // IdleTimeout = 7d, AbsoluteTimeout = 30d
+		fakeClk := clock.NewFake(fixedTime)
+		svc := kagi.NewSessionService(mockStore, nil, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		oldHash := crypto.HashToken(rawToken)
+
+		// Created 28 days ago. Absolute limit is CreatedAt + 30 days = fixedTime + 2 days.
+		// IdleTimeout would be fixedTime + 7 days.
+		// Clamped to fixedTime + 2 days!
+		createdAt := fixedTime.Add(-28 * 24 * time.Hour)
+		absMax := createdAt.Add(cfg.AbsoluteTimeout)
+
+		existingSession := &kagi.Session{
+			ID:        "sess-clamped-rot",
+			UserID:    "user-clamped-rot",
+			TokenHash: oldHash,
+			ExpiresAt: fixedTime.Add(1 * 24 * time.Hour),
+			CreatedAt: createdAt,
+			UpdatedAt: fixedTime.Add(-5 * 24 * time.Hour),
+		}
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), oldHash).Return(existingSession, nil).Times(1)
+		mockStore.EXPECT().UpdateTokenHash(gomock.Any(), "sess-clamped-rot", oldHash, gomock.Any(), absMax).Return(nil).Times(1)
+
+		newRawToken, updatedSess, err := svc.Rotate(context.Background(), rawToken)
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if newRawToken == "" {
+			t.Fatalf("expected non-empty token")
+		}
+		if !updatedSess.ExpiresAt.Equal(absMax) {
+			t.Fatalf("expected ExpiresAt clamped to %v, got %v", absMax, updatedSess.ExpiresAt)
+		}
+		if !updatedSess.CreatedAt.Equal(createdAt) {
+			t.Fatalf("expected CreatedAt preserved as %v, got %v", createdAt, updatedSess.CreatedAt)
+		}
+	})
+
+	t.Run("atomic CAS failure when zero rows updated returns ErrSessionNotFound", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		cfg := kagi.DefaultSessionConfig()
+		fakeClk := clock.NewFake(fixedTime)
+		svc := kagi.NewSessionService(mockStore, nil, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		oldHash := crypto.HashToken(rawToken)
+
+		existingSession := &kagi.Session{
+			ID:        "sess-cas-fail",
+			UserID:    "user-cas-fail",
+			TokenHash: oldHash,
+			ExpiresAt: fixedTime.Add(5 * 24 * time.Hour),
+			CreatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+			UpdatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+		}
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), oldHash).Return(existingSession, nil).Times(1)
+		// Store returns ErrSessionNotFound when CAS fails (concurrent rotation or token already changed)
+		mockStore.EXPECT().UpdateTokenHash(gomock.Any(), "sess-cas-fail", oldHash, gomock.Any(), gomock.Any()).
+			Return(kagi.ErrSessionNotFound).Times(1)
+
+		token, sess, err := svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound on CAS collision, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session")
+		}
+	})
+
+	t.Run("atomic CAS failure when store returns ErrSessionExpired maps to ErrSessionNotFound", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		cfg := kagi.DefaultSessionConfig()
+		fakeClk := clock.NewFake(fixedTime)
+		svc := kagi.NewSessionService(mockStore, nil, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		oldHash := crypto.HashToken(rawToken)
+
+		existingSession := &kagi.Session{
+			ID:        "sess-cas-expired",
+			UserID:    "user-cas-expired",
+			TokenHash: oldHash,
+			ExpiresAt: fixedTime.Add(5 * 24 * time.Hour),
+			CreatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+			UpdatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+		}
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), oldHash).Return(existingSession, nil).Times(1)
+		mockStore.EXPECT().UpdateTokenHash(gomock.Any(), "sess-cas-expired", oldHash, gomock.Any(), gomock.Any()).
+			Return(kagi.ErrSessionExpired).Times(1)
+
+		token, sess, err := svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound when store returns ErrSessionExpired, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session")
+		}
+	})
+
+	t.Run("atomic CAS failure with generic db error propagates", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		cfg := kagi.DefaultSessionConfig()
+		fakeClk := clock.NewFake(fixedTime)
+		svc := kagi.NewSessionService(mockStore, nil, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		oldHash := crypto.HashToken(rawToken)
+
+		existingSession := &kagi.Session{
+			ID:        "sess-cas-dberr",
+			UserID:    "user-cas-dberr",
+			TokenHash: oldHash,
+			ExpiresAt: fixedTime.Add(5 * 24 * time.Hour),
+			CreatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+			UpdatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+		}
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), oldHash).Return(existingSession, nil).Times(1)
+		casErr := errors.New("deadlock detected")
+		mockStore.EXPECT().UpdateTokenHash(gomock.Any(), "sess-cas-dberr", oldHash, gomock.Any(), gomock.Any()).
+			Return(casErr).Times(1)
+
+		token, sess, err := svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, casErr) {
+			t.Fatalf("expected casErr, got %v", err)
+		}
+		if token != "" || sess != nil {
+			t.Fatalf("expected empty token and nil session")
+		}
+	})
+
+	t.Run("integration with inmemory store and concurrent race", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		memStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		cfg := kagi.DefaultSessionConfig()
+		svc := kagi.NewSessionService(memStore, nil, cfg, fakeClk)
+
+		// Create active session
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		initialHash := crypto.HashToken(rawToken)
+		createdAt := fixedTime.Add(-1 * 24 * time.Hour)
+		sess := &kagi.Session{
+			UserID:    "race-user",
+			TokenHash: initialHash,
+			ExpiresAt: fixedTime.Add(6 * 24 * time.Hour),
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt,
+		}
+		if err := memStore.Create(context.Background(), sess); err != nil {
+			t.Fatalf("failed to create session: %v", err)
+		}
+
+		// First rotation succeeds
+		newRawToken, rotatedSess, err := svc.Rotate(context.Background(), rawToken)
+		if err != nil {
+			t.Fatalf("expected successful rotation, got %v", err)
+		}
+		if newRawToken == rawToken {
+			t.Fatalf("expected new token")
+		}
+		if rotatedSess.TokenHash != crypto.HashToken(newRawToken) {
+			t.Fatalf("token hash mismatch on rotated session")
+		}
+
+		// Old token must fail rotation now (CAS mismatch / not found)
+		_, _, err = svc.Rotate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound on reusing old token, got %v", err)
+		}
+
+		// New token can be rotated again
+		newRawToken2, rotatedSess2, err := svc.Rotate(context.Background(), newRawToken)
+		if err != nil {
+			t.Fatalf("expected second rotation to succeed, got %v", err)
+		}
+		if newRawToken2 == newRawToken {
+			t.Fatalf("expected different token on second rotation")
+		}
+		if !rotatedSess2.CreatedAt.Equal(createdAt) {
+			t.Fatalf("expected original CreatedAt preserved")
+		}
+	})
+}

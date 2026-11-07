@@ -228,6 +228,29 @@ func TestKagi_UserStore(t *testing.T) {
 	var _ kagi.UserStore = got
 }
 
+func TestSecretAccessor(t *testing.T) {
+	validSecret := "a-very-long-master-secret-at-least-32-bytes-long"
+
+	cfg := kagi.Config{
+		UserStore:         &mockUserStore{},
+		AccountStore:      &mockAccountStore{},
+		SessionStore:      &mockSessionStore{},
+		VerificationStore: &mockVerificationStore{},
+		RateLimitStore:    &mockRateLimitStore{},
+		Secret:            validSecret,
+	}
+
+	instance, err := kagi.New(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := instance.Secret()
+	if got != validSecret {
+		t.Errorf("Secret() = %q, want %q", got, validSecret)
+	}
+}
+
 func TestNew_FakeClockIntegration(t *testing.T) {
 	validSecret := "a-very-long-master-secret-at-least-32-bytes-long"
 	initialTime := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)

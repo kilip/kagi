@@ -146,6 +146,11 @@ func (k *Kagi) UserStore() UserStore {
 	return k.cfg.UserStore
 }
 
+// Secret returns the configured master secret.
+func (k *Kagi) Secret() string {
+	return k.cfg.Secret
+}
+
 // Cleanup performs a single batched, idempotent deletion of expired sessions,
 // verifications, and rate limit counters (ADR-0010).
 //

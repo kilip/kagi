@@ -71,6 +71,24 @@ func TestMapError(t *testing.T) {
 			wantCode:   "session_not_found",
 		},
 		{
+			name:       "csrf token missing",
+			err:        kagi.ErrCSRFTokenMissing,
+			wantStatus: fiber.StatusForbidden,
+			wantCode:   "csrf_token_missing",
+		},
+		{
+			name:       "csrf token invalid",
+			err:        kagi.ErrCSRFTokenInvalid,
+			wantStatus: fiber.StatusForbidden,
+			wantCode:   "csrf_token_invalid",
+		},
+		{
+			name:       "csrf token mismatch",
+			err:        kagi.ErrCSRFTokenMismatch,
+			wantStatus: fiber.StatusForbidden,
+			wantCode:   "csrf_token_mismatch",
+		},
+		{
 			name:       "unknown error defaults to 500 internal_error",
 			err:        errors.New("something totally unexpected"),
 			wantStatus: fiber.StatusInternalServerError,

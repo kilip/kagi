@@ -36,6 +36,12 @@ func mapError(err error) (int, string) {
 		return fiber.StatusUnauthorized, "invalid_session"
 	case errors.Is(err, kagi.ErrSessionNotFound), errors.Is(err, kagi.ErrSessionExpired):
 		return fiber.StatusUnauthorized, "session_not_found"
+	case errors.Is(err, kagi.ErrCSRFTokenMissing):
+		return fiber.StatusForbidden, "csrf_token_missing"
+	case errors.Is(err, kagi.ErrCSRFTokenInvalid):
+		return fiber.StatusForbidden, "csrf_token_invalid"
+	case errors.Is(err, kagi.ErrCSRFTokenMismatch):
+		return fiber.StatusForbidden, "csrf_token_mismatch"
 	default:
 		return fiber.StatusInternalServerError, "internal_error"
 	}

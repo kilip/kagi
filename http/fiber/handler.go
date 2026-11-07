@@ -59,4 +59,6 @@ func (h *Handler) Group() fiber.Router {
 
 func (h *Handler) registerRoutes() {
 	h.group.Post("/sign-up", h.SignUp)
+	h.group.Post("/sign-in", h.SignIn)
+	h.group.Post("/sign-out", h.SignOut)
 }

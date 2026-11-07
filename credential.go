@@ -2,8 +2,13 @@ package kagi
 
 import (
 	"context"
+	"errors"
+	"net/mail"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/kilip/kagi/internal/clock"
+	"github.com/kilip/kagi/internal/crypto"
 )
 
 // PasswordConfig defines argon2id hashing parameters and complexity requirements.
@@ -80,7 +85,111 @@ func NewCredentialService(users UserStore, accounts AccountStore, password Passw
 
 // SignUp registers a new user and creates their primary credential account.
 func (s *CredentialService) SignUp(ctx context.Context, in SignUpInput) (*User, error) {
-	return nil, nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	email := strings.ToLower(strings.TrimSpace(in.Email))
+	if email == "" || !isValidEmail(email) {
+		return nil, ErrInvalidCredentials
+	}
+
+	pwdCfg := s.password
+	if pwdCfg.Memory == 0 {
+		defaultCfg := DefaultPasswordConfig()
+		pwdCfg.Memory = defaultCfg.Memory
+		pwdCfg.Iterations = defaultCfg.Iterations
+		pwdCfg.Parallelism = defaultCfg.Parallelism
+		pwdCfg.SaltLength = defaultCfg.SaltLength
+		pwdCfg.KeyLength = defaultCfg.KeyLength
+		if pwdCfg.MinLength == 0 {
+			pwdCfg.MinLength = defaultCfg.MinLength
+		}
+		if pwdCfg.MaxLength == 0 {
+			pwdCfg.MaxLength = defaultCfg.MaxLength
+		}
+	}
+
+	pwLen := utf8.RuneCountInString(in.Password)
+	if (pwdCfg.MinLength > 0 && pwLen < pwdCfg.MinLength) ||
+		(pwdCfg.MaxLength > 0 && pwLen > pwdCfg.MaxLength) {
+		return nil, ErrPasswordTooWeak
+	}
+
+	existing, err := s.users.GetByEmail(ctx, email)
+	if err != nil && !errors.Is(err, ErrUserNotFound) {
+		return nil, err
+	}
+	if existing != nil {
+		return nil, ErrEmailAlreadyExists
+	}
+
+	hash, err := crypto.HashPassword(in.Password, crypto.Argon2Params{
+		Memory:      pwdCfg.Memory,
+		Iterations:  pwdCfg.Iterations,
+		Parallelism: pwdCfg.Parallelism,
+		SaltLength:  pwdCfg.SaltLength,
+		KeyLength:   pwdCfg.KeyLength,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	user := &User{
+		Email:            email,
+		Name:             strings.TrimSpace(in.Name),
+		EmailVerified:    false,
+		TwoFactorEnabled: false,
+	}
+
+	if err := s.users.Create(ctx, user); err != nil {
+		return nil, err
+	}
+
+	account := &Account{
+		UserID:            user.ID,
+		Provider:          "credential",
+		ProviderAccountID: email,
+		PasswordHash:      hash,
+	}
+
+	if err := s.accounts.Create(ctx, account); err != nil {
+		_ = s.users.Delete(ctx, user.ID)
+		if errors.Is(err, ErrAccountAlreadyExists) {
+			return nil, ErrEmailAlreadyExists
+		}
+		return nil, err
+	}
+
+	return user, nil
+}
+
+func isValidEmail(email string) bool {
+	if len(email) < 3 || len(email) > 254 {
+		return false
+	}
+	addr, err := mail.ParseAddress(email)
+	if err != nil || addr.Address != email {
+		return false
+	}
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 {
+		return false
+	}
+	local, domain := parts[0], parts[1]
+	if len(local) == 0 || len(domain) == 0 {
+		return false
+	}
+	labels := strings.Split(domain, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if len(label) == 0 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+	}
+	return true
 }
 
 // SignIn authenticates email/password credentials with constant-time equality checks

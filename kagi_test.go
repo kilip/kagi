@@ -254,3 +254,96 @@ func TestKagi_Cleanup(t *testing.T) {
 		t.Errorf("expected 10 rate limits deleted, got %d", rateLimitStore.deletedCount)
 	}
 }
+
+func TestCredentialService_WiringAndDefaults(t *testing.T) {
+	userStore := &mockUserStore{}
+	accountStore := &mockAccountStore{}
+	fakeClk := clock.NewFake(time.Now())
+
+	t.Run("NewCredentialService with explicit dependencies", func(t *testing.T) {
+		pwdCfg := kagi.PasswordConfig{
+			MinLength:   10,
+			MaxLength:   64,
+			Memory:      32 * 1024,
+			Iterations:  2,
+			Parallelism: 1,
+			SaltLength:  16,
+			KeyLength:   32,
+		}
+		svc := kagi.NewCredentialService(userStore, accountStore, pwdCfg, fakeClk)
+		if svc == nil {
+			t.Fatal("expected non-nil CredentialService")
+		}
+
+		gotUsers, gotAccounts, gotPwd, gotClk := kagi.CredentialServiceDependenciesForTest(svc)
+		if gotUsers != userStore {
+			t.Errorf("expected userStore %v, got %v", userStore, gotUsers)
+		}
+		if gotAccounts != accountStore {
+			t.Errorf("expected accountStore %v, got %v", accountStore, gotAccounts)
+		}
+		if gotPwd != pwdCfg {
+			t.Errorf("expected password config %+v, got %+v", pwdCfg, gotPwd)
+		}
+		if gotClk != fakeClk {
+			t.Errorf("expected clock %v, got %v", fakeClk, gotClk)
+		}
+	})
+
+	t.Run("NewCredentialService with zero-value password config and nil clock", func(t *testing.T) {
+		svc := kagi.NewCredentialService(userStore, accountStore, kagi.PasswordConfig{}, nil)
+		if svc == nil {
+			t.Fatal("expected non-nil CredentialService")
+		}
+
+		gotUsers, gotAccounts, gotPwd, gotClk := kagi.CredentialServiceDependenciesForTest(svc)
+		if gotUsers != userStore {
+			t.Errorf("expected userStore %v, got %v", userStore, gotUsers)
+		}
+		if gotAccounts != accountStore {
+			t.Errorf("expected accountStore %v, got %v", accountStore, gotAccounts)
+		}
+		expectedPwd := kagi.DefaultPasswordConfig()
+		if gotPwd != expectedPwd {
+			t.Errorf("expected default password config %+v, got %+v", expectedPwd, gotPwd)
+		}
+		if _, ok := gotClk.(clock.RealClock); !ok {
+			t.Errorf("expected clock.RealClock, got %T", gotClk)
+		}
+	})
+
+	t.Run("kagi.New wires CredentialService with injected dependencies and defaults", func(t *testing.T) {
+		cfg := kagi.Config{
+			UserStore:         userStore,
+			AccountStore:      accountStore,
+			SessionStore:      &mockSessionStore{},
+			VerificationStore: &mockVerificationStore{},
+			RateLimitStore:    &mockRateLimitStore{},
+			Secret:            "a-very-long-master-secret-at-least-32-bytes-long",
+			Clock:             fakeClk,
+		}
+
+		instance, err := kagi.New(cfg)
+		if err != nil {
+			t.Fatalf("unexpected error from kagi.New: %v", err)
+		}
+		if instance.Credentials == nil {
+			t.Fatal("expected non-nil instance.Credentials")
+		}
+
+		gotUsers, gotAccounts, gotPwd, gotClk := kagi.CredentialServiceDependenciesForTest(instance.Credentials)
+		if gotUsers != userStore {
+			t.Errorf("expected injected userStore %v, got %v", userStore, gotUsers)
+		}
+		if gotAccounts != accountStore {
+			t.Errorf("expected injected accountStore %v, got %v", accountStore, gotAccounts)
+		}
+		expectedPwd := kagi.DefaultPasswordConfig()
+		if gotPwd != expectedPwd {
+			t.Errorf("expected default password config %+v, got %+v", expectedPwd, gotPwd)
+		}
+		if gotClk != fakeClk {
+			t.Errorf("expected injected fakeClk %v, got %v", fakeClk, gotClk)
+		}
+	})
+}

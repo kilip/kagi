@@ -2,6 +2,8 @@ package kagi
 
 import (
 	"context"
+
+	"github.com/kilip/kagi/internal/clock"
 )
 
 // PasswordConfig defines argon2id hashing parameters and complexity requirements.
@@ -52,7 +54,28 @@ type AuthResult struct {
 
 // CredentialService manages email/password sign-up, sign-in, and password lifecycle.
 type CredentialService struct {
-	// unexported fields
+	users    UserStore
+	accounts AccountStore
+	password PasswordConfig
+	clock    clock.Clock
+}
+
+// NewCredentialService initializes and returns a new CredentialService.
+// Missing or zero-valued password configuration falls back to DefaultPasswordConfig().
+// A nil clock falls back to clock.RealClock{}.
+func NewCredentialService(users UserStore, accounts AccountStore, password PasswordConfig, clk clock.Clock) *CredentialService {
+	if password.Memory == 0 {
+		password = DefaultPasswordConfig()
+	}
+	if clk == nil {
+		clk = clock.RealClock{}
+	}
+	return &CredentialService{
+		users:    users,
+		accounts: accounts,
+		password: password,
+		clock:    clk,
+	}
 }
 
 // SignUp registers a new user and creates their primary credential account.

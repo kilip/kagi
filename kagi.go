@@ -89,7 +89,7 @@ func New(cfg Config) (*Kagi, error) {
 	}
 
 	k := &Kagi{
-		Credentials: &CredentialService{},
+		Credentials: NewCredentialService(cfg.UserStore, cfg.AccountStore, cfg.Password, cfg.Clock),
 		Sessions:    &SessionService{},
 		OTP:         &OTPService{},
 		OAuth:       &OAuthService{},

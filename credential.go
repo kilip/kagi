@@ -3,6 +3,7 @@ package kagi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/mail"
 	"strings"
 	"unicode/utf8"
@@ -35,6 +36,27 @@ func DefaultPasswordConfig() PasswordConfig {
 	}
 }
 
+// ToArgon2Params converts PasswordConfig to crypto.Argon2Params.
+// If PasswordConfig parameters are unset (Memory == 0), safe defaults are applied.
+func (p PasswordConfig) ToArgon2Params() crypto.Argon2Params {
+	if p.Memory == 0 {
+		p = DefaultPasswordConfig()
+	}
+	if p.SaltLength == 0 {
+		p.SaltLength = 16
+	}
+	if p.KeyLength == 0 {
+		p.KeyLength = 32
+	}
+	return crypto.Argon2Params{
+		Memory:      p.Memory,
+		Iterations:  p.Iterations,
+		Parallelism: p.Parallelism,
+		SaltLength:  p.SaltLength,
+		KeyLength:   p.KeyLength,
+	}
+}
+
 // SignUpInput contains the fields needed to register a new user with credentials.
 type SignUpInput struct {
 	Email    string `json:"email"`
@@ -57,30 +79,47 @@ type AuthResult struct {
 	RawToken string   `json:"raw_token"` // Fixed 43-character base64url random token
 }
 
+// CredentialOption configures a CredentialService.
+type CredentialOption func(*CredentialService)
+
+// WithSessionService configures the SessionService used to issue sessions upon sign-in.
+func WithSessionService(sessions *SessionService) CredentialOption {
+	return func(s *CredentialService) {
+		s.sessions = sessions
+	}
+}
+
 // CredentialService manages email/password sign-up, sign-in, and password lifecycle.
 type CredentialService struct {
 	users    UserStore
 	accounts AccountStore
 	password PasswordConfig
 	clock    clock.Clock
+	sessions *SessionService
 }
 
 // NewCredentialService initializes and returns a new CredentialService.
 // Missing or zero-valued password configuration falls back to DefaultPasswordConfig().
 // A nil clock falls back to clock.RealClock{}.
-func NewCredentialService(users UserStore, accounts AccountStore, password PasswordConfig, clk clock.Clock) *CredentialService {
+func NewCredentialService(users UserStore, accounts AccountStore, password PasswordConfig, clk clock.Clock, opts ...CredentialOption) *CredentialService {
 	if password.Memory == 0 {
 		password = DefaultPasswordConfig()
 	}
 	if clk == nil {
 		clk = clock.RealClock{}
 	}
-	return &CredentialService{
+	s := &CredentialService{
 		users:    users,
 		accounts: accounts,
 		password: password,
 		clock:    clk,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
 }
 
 // SignUp registers a new user and creates their primary credential account.
@@ -195,7 +234,55 @@ func isValidEmail(email string) bool {
 // SignIn authenticates email/password credentials with constant-time equality checks
 // and Argon2id timing equalization against user enumeration.
 func (s *CredentialService) SignIn(ctx context.Context, in SignInInput) (*AuthResult, error) {
-	return nil, nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	email := strings.ToLower(strings.TrimSpace(in.Email))
+	dummyHash := crypto.DummyHash(s.password.ToArgon2Params())
+
+	if email == "" || !isValidEmail(email) {
+		_, _ = crypto.VerifyPassword(in.Password, dummyHash)
+		return nil, ErrInvalidCredentials
+	}
+
+	user, err := s.users.GetByEmail(ctx, email)
+	if errors.Is(err, ErrUserNotFound) {
+		_, _ = crypto.VerifyPassword(in.Password, dummyHash)
+		return nil, ErrInvalidCredentials
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	account, err := s.accounts.GetByProvider(ctx, "credential", email)
+	if errors.Is(err, ErrAccountNotFound) {
+		_, _ = crypto.VerifyPassword(in.Password, dummyHash)
+		return nil, ErrInvalidCredentials
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	matched, err := crypto.VerifyPassword(in.Password, account.PasswordHash)
+	if err != nil || !matched {
+		return nil, ErrInvalidCredentials
+	}
+
+	if s.sessions == nil {
+		return nil, fmt.Errorf("%w: session service not configured", ErrInternal)
+	}
+
+	session, rawToken, err := s.sessions.createSession(ctx, user.ID, user.TwoFactorEnabled, in.IPAddress, in.UserAgent)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AuthResult{
+		User:     user,
+		Session:  session,
+		RawToken: rawToken,
+	}, nil
 }
 
 // RequestPasswordReset generates a verification token and delivers reset instructions via Mailer.

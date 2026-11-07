@@ -1418,3 +1418,607 @@ func TestCredentialService_SignUp_SecurityContracts(t *testing.T) {
 		}
 	})
 }
+
+func TestPasswordConfig_ToArgon2Params(t *testing.T) {
+	t.Parallel()
+
+	t.Run("zero value falls back to OWASP defaults", func(t *testing.T) {
+		cfg := kagi.PasswordConfig{}
+		params := cfg.ToArgon2Params()
+		defaults := kagi.DefaultPasswordConfig()
+
+		if params.Memory != defaults.Memory {
+			t.Errorf("Memory mismatch: got %d, want %d", params.Memory, defaults.Memory)
+		}
+		if params.Iterations != defaults.Iterations {
+			t.Errorf("Iterations mismatch: got %d, want %d", params.Iterations, defaults.Iterations)
+		}
+		if params.Parallelism != defaults.Parallelism {
+			t.Errorf("Parallelism mismatch: got %d, want %d", params.Parallelism, defaults.Parallelism)
+		}
+		if params.SaltLength != defaults.SaltLength {
+			t.Errorf("SaltLength mismatch: got %d, want %d", params.SaltLength, defaults.SaltLength)
+		}
+		if params.KeyLength != defaults.KeyLength {
+			t.Errorf("KeyLength mismatch: got %d, want %d", params.KeyLength, defaults.KeyLength)
+		}
+	})
+
+	t.Run("custom params preserved and zero salt/key lengths defaulted", func(t *testing.T) {
+		cfg := kagi.PasswordConfig{
+			Memory:      16 * 1024,
+			Iterations:  2,
+			Parallelism: 4,
+		}
+		params := cfg.ToArgon2Params()
+		if params.Memory != 16*1024 || params.Iterations != 2 || params.Parallelism != 4 {
+			t.Errorf("custom parameters not preserved: %+v", params)
+		}
+		if params.SaltLength != 16 {
+			t.Errorf("expected default SaltLength 16, got %d", params.SaltLength)
+		}
+		if params.KeyLength != 32 {
+			t.Errorf("expected default KeyLength 32, got %d", params.KeyLength)
+		}
+	})
+}
+
+func TestCredentialService_SignIn_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	fixedTime := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	fakeClk := clock.NewFake(fixedTime)
+	pwdCfg := fastPasswordConfig()
+
+	validEmail := "user@example.com"
+	validPassword := "CorrectP@ssw0rd!"
+	validHash, err := crypto.HashPassword(validPassword, pwdCfg.ToArgon2Params())
+	if err != nil {
+		t.Fatalf("failed to hash password: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		input          kagi.SignInInput
+		setupStores    func(uStore *spyUserStore, aStore *spyAccountStore)
+		wantErr        error
+		wantPending2FA bool
+	}{
+		{
+			name:        "empty email returns ErrInvalidCredentials",
+			input:       kagi.SignInInput{Email: "", Password: validPassword},
+			setupStores: func(uStore *spyUserStore, aStore *spyAccountStore) {},
+			wantErr:     kagi.ErrInvalidCredentials,
+		},
+		{
+			name:        "whitespace only email returns ErrInvalidCredentials",
+			input:       kagi.SignInInput{Email: "   ", Password: validPassword},
+			setupStores: func(uStore *spyUserStore, aStore *spyAccountStore) {},
+			wantErr:     kagi.ErrInvalidCredentials,
+		},
+		{
+			name:        "malformed email missing at-sign returns ErrInvalidCredentials",
+			input:       kagi.SignInInput{Email: "invalidemail.com", Password: validPassword},
+			setupStores: func(uStore *spyUserStore, aStore *spyAccountStore) {},
+			wantErr:     kagi.ErrInvalidCredentials,
+		},
+		{
+			name:        "malformed email missing domain returns ErrInvalidCredentials",
+			input:       kagi.SignInInput{Email: "user@", Password: validPassword},
+			setupStores: func(uStore *spyUserStore, aStore *spyAccountStore) {},
+			wantErr:     kagi.ErrInvalidCredentials,
+		},
+		{
+			name:        "malformed email missing local part returns ErrInvalidCredentials",
+			input:       kagi.SignInInput{Email: "@example.com", Password: validPassword},
+			setupStores: func(uStore *spyUserStore, aStore *spyAccountStore) {},
+			wantErr:     kagi.ErrInvalidCredentials,
+		},
+		{
+			name:        "non-existent user returns ErrInvalidCredentials",
+			input:       kagi.SignInInput{Email: "nonexistent@example.com", Password: validPassword},
+			setupStores: func(uStore *spyUserStore, aStore *spyAccountStore) {},
+			wantErr:     kagi.ErrInvalidCredentials,
+		},
+		{
+			name:  "user exists but no credential account returns ErrInvalidCredentials",
+			input: kagi.SignInInput{Email: "oauthonly@example.com", Password: validPassword},
+			setupStores: func(uStore *spyUserStore, aStore *spyAccountStore) {
+				_ = uStore.Create(context.Background(), &kagi.User{
+					ID:    "usr_oauth",
+					Email: "oauthonly@example.com",
+					Name:  "OAuth User",
+				})
+			},
+			wantErr: kagi.ErrInvalidCredentials,
+		},
+		{
+			name:  "wrong password returns ErrInvalidCredentials",
+			input: kagi.SignInInput{Email: validEmail, Password: "WrongPassword123!"},
+			setupStores: func(uStore *spyUserStore, aStore *spyAccountStore) {
+				_ = uStore.Create(context.Background(), &kagi.User{
+					ID:    "usr_valid",
+					Email: validEmail,
+					Name:  "Valid User",
+				})
+				_ = aStore.Create(context.Background(), &kagi.Account{
+					UserID:            "usr_valid",
+					Provider:          "credential",
+					ProviderAccountID: validEmail,
+					PasswordHash:      validHash,
+				})
+			},
+			wantErr: kagi.ErrInvalidCredentials,
+		},
+		{
+			name:  "valid credentials with 2FA disabled produces active session",
+			input: kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.168.1.1", UserAgent: "TestAgent/1.0"},
+			setupStores: func(uStore *spyUserStore, aStore *spyAccountStore) {
+				_ = uStore.Create(context.Background(), &kagi.User{
+					ID:               "usr_valid",
+					Email:            validEmail,
+					Name:             "Valid User",
+					TwoFactorEnabled: false,
+				})
+				_ = aStore.Create(context.Background(), &kagi.Account{
+					UserID:            "usr_valid",
+					Provider:          "credential",
+					ProviderAccountID: validEmail,
+					PasswordHash:      validHash,
+				})
+			},
+			wantErr:        nil,
+			wantPending2FA: false,
+		},
+		{
+			name:  "valid credentials with 2FA enabled produces pending 2FA session",
+			input: kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.168.1.2", UserAgent: "TestAgent/2.0"},
+			setupStores: func(uStore *spyUserStore, aStore *spyAccountStore) {
+				_ = uStore.Create(context.Background(), &kagi.User{
+					ID:               "usr_2fa",
+					Email:            validEmail,
+					Name:             "2FA User",
+					TwoFactorEnabled: true,
+				})
+				_ = aStore.Create(context.Background(), &kagi.Account{
+					UserID:            "usr_2fa",
+					Provider:          "credential",
+					ProviderAccountID: validEmail,
+					PasswordHash:      validHash,
+				})
+			},
+			wantErr:        nil,
+			wantPending2FA: true,
+		},
+		{
+			name:  "email normalization trims spaces and downcases",
+			input: kagi.SignInInput{Email: "  USER@EXAMPLE.COM  ", Password: validPassword},
+			setupStores: func(uStore *spyUserStore, aStore *spyAccountStore) {
+				_ = uStore.Create(context.Background(), &kagi.User{
+					ID:    "usr_valid",
+					Email: validEmail,
+					Name:  "Valid User",
+				})
+				_ = aStore.Create(context.Background(), &kagi.Account{
+					UserID:            "usr_valid",
+					Provider:          "credential",
+					ProviderAccountID: validEmail,
+					PasswordHash:      validHash,
+				})
+			},
+			wantErr:        nil,
+			wantPending2FA: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			uStore := newSpyUserStore()
+			aStore := newSpyAccountStore()
+			sStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+
+			sessSvc := kagi.NewSessionService(sStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+			credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, kagi.WithSessionService(sessSvc))
+
+			tt.setupStores(uStore, aStore)
+
+			res, err := credSvc.SignIn(context.Background(), tt.input)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("expected error %v, got %v", tt.wantErr, err)
+				}
+				if res != nil {
+					t.Fatalf("expected nil result on error, got %+v", res)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res == nil {
+				t.Fatal("expected non-nil AuthResult")
+			}
+			if res.User == nil {
+				t.Fatal("expected non-nil User in AuthResult")
+			}
+			if res.Session == nil {
+				t.Fatal("expected non-nil Session in AuthResult")
+			}
+			if len(res.RawToken) != 43 {
+				t.Errorf("expected RawToken length 43, got %d (%q)", len(res.RawToken), res.RawToken)
+			}
+			if err := crypto.ValidateSessionTokenFormat(res.RawToken); err != nil {
+				t.Errorf("invalid RawToken format: %v", err)
+			}
+			if res.Session.Pending2FA != tt.wantPending2FA {
+				t.Errorf("expected Pending2FA=%v, got %v", tt.wantPending2FA, res.Session.Pending2FA)
+			}
+			if res.Session.UserID != res.User.ID {
+				t.Errorf("session UserID mismatch: got %q, want %q", res.Session.UserID, res.User.ID)
+			}
+			if tt.input.IPAddress != "" && res.Session.IPAddress != tt.input.IPAddress {
+				t.Errorf("session IPAddress mismatch: got %q, want %q", res.Session.IPAddress, tt.input.IPAddress)
+			}
+			if tt.input.UserAgent != "" && res.Session.UserAgent != tt.input.UserAgent {
+				t.Errorf("session UserAgent mismatch: got %q, want %q", res.Session.UserAgent, tt.input.UserAgent)
+			}
+		})
+	}
+}
+
+func TestCredentialService_SignIn_ErrorsAndContext(t *testing.T) {
+	t.Parallel()
+
+	fixedTime := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	fakeClk := clock.NewFake(fixedTime)
+	pwdCfg := fastPasswordConfig()
+
+	validEmail := "user@example.com"
+	validPassword := "CorrectP@ssw0rd!"
+	validHash, err := crypto.HashPassword(validPassword, pwdCfg.ToArgon2Params())
+	if err != nil {
+		t.Fatalf("failed to hash password: %v", err)
+	}
+
+	t.Run("canceled context returns context.Canceled", func(t *testing.T) {
+		t.Parallel()
+
+		uStore := newSpyUserStore()
+		aStore := newSpyAccountStore()
+		sStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		sessSvc := kagi.NewSessionService(sStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+		credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, kagi.WithSessionService(sessSvc))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		res, err := credSvc.SignIn(ctx, kagi.SignInInput{Email: validEmail, Password: validPassword})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+		if res != nil {
+			t.Fatalf("expected nil result, got %+v", res)
+		}
+	})
+
+	t.Run("unconfigured session service returns ErrInternal", func(t *testing.T) {
+		t.Parallel()
+
+		uStore := newSpyUserStore()
+		aStore := newSpyAccountStore()
+		_ = uStore.Create(context.Background(), &kagi.User{
+			ID:    "usr_valid",
+			Email: validEmail,
+		})
+		_ = aStore.Create(context.Background(), &kagi.Account{
+			UserID:            "usr_valid",
+			Provider:          "credential",
+			ProviderAccountID: validEmail,
+			PasswordHash:      validHash,
+		})
+
+		// Construct without session service option
+		credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk)
+
+		res, err := credSvc.SignIn(context.Background(), kagi.SignInInput{Email: validEmail, Password: validPassword})
+		if !errors.Is(err, kagi.ErrInternal) {
+			t.Fatalf("expected ErrInternal, got %v", err)
+		}
+		if res != nil {
+			t.Fatalf("expected nil result, got %+v", res)
+		}
+	})
+
+	t.Run("user store unexpected error returned directly", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		uStore := mock.NewMockUserStore(ctrl)
+		aStore := mock.NewMockAccountStore(ctrl)
+		sStore := mock.NewMockSessionStore(ctrl)
+
+		expectedErr := errors.New("db connection lost")
+		uStore.EXPECT().GetByEmail(gomock.Any(), validEmail).Return(nil, expectedErr)
+
+		sessSvc := kagi.NewSessionService(sStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+		credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, kagi.WithSessionService(sessSvc))
+
+		res, err := credSvc.SignIn(context.Background(), kagi.SignInInput{Email: validEmail, Password: validPassword})
+		if !errors.Is(err, expectedErr) {
+			t.Fatalf("expected %v, got %v", expectedErr, err)
+		}
+		if res != nil {
+			t.Fatalf("expected nil result, got %+v", res)
+		}
+	})
+
+	t.Run("account store unexpected error returned directly", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		uStore := mock.NewMockUserStore(ctrl)
+		aStore := mock.NewMockAccountStore(ctrl)
+		sStore := mock.NewMockSessionStore(ctrl)
+
+		uStore.EXPECT().GetByEmail(gomock.Any(), validEmail).Return(&kagi.User{ID: "usr_1", Email: validEmail}, nil)
+		expectedErr := errors.New("account table locked")
+		aStore.EXPECT().GetByProvider(gomock.Any(), "credential", validEmail).Return(nil, expectedErr)
+
+		sessSvc := kagi.NewSessionService(sStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+		credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, kagi.WithSessionService(sessSvc))
+
+		res, err := credSvc.SignIn(context.Background(), kagi.SignInInput{Email: validEmail, Password: validPassword})
+		if !errors.Is(err, expectedErr) {
+			t.Fatalf("expected %v, got %v", expectedErr, err)
+		}
+		if res != nil {
+			t.Fatalf("expected nil result, got %+v", res)
+		}
+	})
+
+	t.Run("session store error returned directly", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		uStore := mock.NewMockUserStore(ctrl)
+		aStore := mock.NewMockAccountStore(ctrl)
+		sStore := mock.NewMockSessionStore(ctrl)
+
+		uStore.EXPECT().GetByEmail(gomock.Any(), validEmail).Return(&kagi.User{ID: "usr_1", Email: validEmail}, nil)
+		aStore.EXPECT().GetByProvider(gomock.Any(), "credential", validEmail).Return(&kagi.Account{
+			UserID:            "usr_1",
+			Provider:          "credential",
+			ProviderAccountID: validEmail,
+			PasswordHash:      validHash,
+		}, nil)
+		sessErr := errors.New("session insert failed")
+		sStore.EXPECT().Create(gomock.Any(), gomock.Any()).Return(sessErr)
+
+		sessSvc := kagi.NewSessionService(sStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+		credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, kagi.WithSessionService(sessSvc))
+
+		res, err := credSvc.SignIn(context.Background(), kagi.SignInInput{Email: validEmail, Password: validPassword})
+		if !errors.Is(err, sessErr) {
+			t.Fatalf("expected %v, got %v", sessErr, err)
+		}
+		if res != nil {
+			t.Fatalf("expected nil result, got %+v", res)
+		}
+	})
+}
+
+func TestCredentialService_SignIn_SecurityContracts(t *testing.T) {
+	t.Parallel()
+
+	fixedTime := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	fakeClk := clock.NewFake(fixedTime)
+	pwdCfg := fastPasswordConfig()
+
+	secretPassword := "SuperSecretPassword123!"
+	validEmail := "security@example.com"
+	validHash, err := crypto.HashPassword(secretPassword, pwdCfg.ToArgon2Params())
+	if err != nil {
+		t.Fatalf("failed to hash password: %v", err)
+	}
+
+	t.Run("error messages never leak plain password or password hash", func(t *testing.T) {
+		t.Parallel()
+
+		uStore := newSpyUserStore()
+		aStore := newSpyAccountStore()
+		sStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		sessSvc := kagi.NewSessionService(sStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+		credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, kagi.WithSessionService(sessSvc))
+
+		_ = uStore.Create(context.Background(), &kagi.User{
+			ID:    "usr_sec",
+			Email: validEmail,
+		})
+		_ = aStore.Create(context.Background(), &kagi.Account{
+			UserID:            "usr_sec",
+			Provider:          "credential",
+			ProviderAccountID: validEmail,
+			PasswordHash:      validHash,
+		})
+
+		inputs := []kagi.SignInInput{
+			{Email: validEmail, Password: "WrongPasswordWithSecret" + secretPassword},
+			{Email: "unknown@example.com", Password: secretPassword},
+			{Email: "invalid-email", Password: secretPassword},
+		}
+
+		for _, in := range inputs {
+			_, err := credSvc.SignIn(context.Background(), in)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			errMsg := err.Error()
+			if strings.Contains(errMsg, secretPassword) {
+				t.Fatalf("security violation: error leaked plaintext password %q: %v", secretPassword, err)
+			}
+			if strings.Contains(errMsg, validHash) {
+				t.Fatalf("security violation: error leaked password hash %q: %v", validHash, err)
+			}
+		}
+	})
+
+	t.Run("session token hash is masked in JSON serialization", func(t *testing.T) {
+		t.Parallel()
+
+		uStore := newSpyUserStore()
+		aStore := newSpyAccountStore()
+		sStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		sessSvc := kagi.NewSessionService(sStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+		credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, kagi.WithSessionService(sessSvc))
+
+		_ = uStore.Create(context.Background(), &kagi.User{
+			ID:    "usr_sec",
+			Email: validEmail,
+		})
+		_ = aStore.Create(context.Background(), &kagi.Account{
+			UserID:            "usr_sec",
+			Provider:          "credential",
+			ProviderAccountID: validEmail,
+			PasswordHash:      validHash,
+		})
+
+		res, err := credSvc.SignIn(context.Background(), kagi.SignInInput{Email: validEmail, Password: secretPassword})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify raw token length and hash match
+		if len(res.RawToken) != 43 {
+			t.Fatalf("expected raw token length 43, got %d", len(res.RawToken))
+		}
+		expectedHash := crypto.HashToken(res.RawToken)
+		if res.Session.TokenHash != expectedHash {
+			t.Errorf("token hash mismatch: got %q, want %q", res.Session.TokenHash, expectedHash)
+		}
+
+		// JSON serialization must mask TokenHash
+		sessionBytes, err := json.Marshal(res.Session)
+		if err != nil {
+			t.Fatalf("json marshal failed: %v", err)
+		}
+		sessionJSON := string(sessionBytes)
+		if strings.Contains(sessionJSON, "token_hash") || strings.Contains(sessionJSON, res.Session.TokenHash) {
+			t.Errorf("security violation: TokenHash exposed in JSON: %s", sessionJSON)
+		}
+	})
+
+	t.Run("2FA isolation: pending 2FA sessions are never cached in secondary storage", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		uStore := mock.NewMockUserStore(ctrl)
+		aStore := mock.NewMockAccountStore(ctrl)
+		sStore := mock.NewMockSessionStore(ctrl)
+		secStore := mock.NewMockSecondaryStorage(ctrl)
+
+		// When Pending2FA is true, SetSession must NEVER be called on secondary storage
+		secStore.EXPECT().SetSession(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+		sStore.EXPECT().Create(gomock.Any(), gomock.Any()).Return(nil)
+
+		uStore.EXPECT().GetByEmail(gomock.Any(), validEmail).Return(&kagi.User{
+			ID:               "usr_2fa",
+			Email:            validEmail,
+			TwoFactorEnabled: true,
+		}, nil)
+		aStore.EXPECT().GetByProvider(gomock.Any(), "credential", validEmail).Return(&kagi.Account{
+			UserID:            "usr_2fa",
+			Provider:          "credential",
+			ProviderAccountID: validEmail,
+			PasswordHash:      validHash,
+		}, nil)
+
+		sessSvc := kagi.NewSessionService(sStore, secStore, kagi.DefaultSessionConfig(), fakeClk)
+		credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, kagi.WithSessionService(sessSvc))
+
+		res, err := credSvc.SignIn(context.Background(), kagi.SignInInput{Email: validEmail, Password: secretPassword})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !res.Session.Pending2FA {
+			t.Error("expected Pending2FA true")
+		}
+	})
+
+	t.Run("2FA isolation: active sessions are cached in secondary storage", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		uStore := mock.NewMockUserStore(ctrl)
+		aStore := mock.NewMockAccountStore(ctrl)
+		sStore := mock.NewMockSessionStore(ctrl)
+		secStore := mock.NewMockSecondaryStorage(ctrl)
+
+		// When Pending2FA is false, SetSession MUST be called on secondary storage
+		secStore.EXPECT().SetSession(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).Times(1)
+		sStore.EXPECT().Create(gomock.Any(), gomock.Any()).Return(nil)
+
+		uStore.EXPECT().GetByEmail(gomock.Any(), validEmail).Return(&kagi.User{
+			ID:               "usr_active",
+			Email:            validEmail,
+			TwoFactorEnabled: false,
+		}, nil)
+		aStore.EXPECT().GetByProvider(gomock.Any(), "credential", validEmail).Return(&kagi.Account{
+			UserID:            "usr_active",
+			Provider:          "credential",
+			ProviderAccountID: validEmail,
+			PasswordHash:      validHash,
+		}, nil)
+
+		sessSvc := kagi.NewSessionService(sStore, secStore, kagi.DefaultSessionConfig(), fakeClk)
+		credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, kagi.WithSessionService(sessSvc))
+
+		res, err := credSvc.SignIn(context.Background(), kagi.SignInInput{Email: validEmail, Password: secretPassword})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.Session.Pending2FA {
+			t.Error("expected Pending2FA false")
+		}
+	})
+}
+
+func TestCredentialService_FunctionalOptions(t *testing.T) {
+	t.Parallel()
+
+	uStore := newSpyUserStore()
+	aStore := newSpyAccountStore()
+	pwdCfg := fastPasswordConfig()
+	fakeClk := clock.NewFake(time.Now())
+
+	t.Run("backward compatible without options", func(t *testing.T) {
+		svc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk)
+		if svc == nil {
+			t.Fatal("expected non-nil CredentialService")
+		}
+		if got := kagi.CredentialServiceSessionServiceForTest(svc); got != nil {
+			t.Errorf("expected nil sessions, got %v", got)
+		}
+	})
+
+	t.Run("WithSessionService configures sessions", func(t *testing.T) {
+		sStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		sessSvc := kagi.NewSessionService(sStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+		svc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, kagi.WithSessionService(sessSvc))
+		if svc == nil {
+			t.Fatal("expected non-nil CredentialService")
+		}
+		if got := kagi.CredentialServiceSessionServiceForTest(svc); got != sessSvc {
+			t.Errorf("expected session service %v, got %v", sessSvc, got)
+		}
+	})
+
+	t.Run("nil option ignored safely", func(t *testing.T) {
+		svc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, nil)
+		if svc == nil {
+			t.Fatal("expected non-nil CredentialService")
+		}
+	})
+}

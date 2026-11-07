@@ -88,9 +88,12 @@ func New(cfg Config) (*Kagi, error) {
 		return nil, ErrInvalidConfig
 	}
 
+	sessions := NewSessionService(cfg.SessionStore, cfg.SecondaryStorage, cfg.Session, cfg.Clock)
+	credentials := NewCredentialService(cfg.UserStore, cfg.AccountStore, cfg.Password, cfg.Clock, WithSessionService(sessions))
+
 	k := &Kagi{
-		Credentials: NewCredentialService(cfg.UserStore, cfg.AccountStore, cfg.Password, cfg.Clock),
-		Sessions:    &SessionService{},
+		Credentials: credentials,
+		Sessions:    sessions,
 		OTP:         &OTPService{},
 		OAuth:       &OAuthService{},
 		cfg:         cfg,

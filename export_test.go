@@ -15,6 +15,15 @@ func CredentialServiceDependenciesForTest(s *CredentialService) (UserStore, Acco
 	return s.users, s.accounts, s.password, s.clock
 }
 
+// CredentialServiceSessionServiceForTest exposes unexported sessions field of CredentialService
+// strictly for package-level testing in kagi_test.
+func CredentialServiceSessionServiceForTest(s *CredentialService) *SessionService {
+	if s == nil {
+		return nil
+	}
+	return s.sessions
+}
+
 // SessionServiceDependenciesForTest exposes unexported fields of SessionService
 // strictly for package-level testing in kagi_test.
 func SessionServiceDependenciesForTest(s *SessionService) (SessionStore, SecondaryStorage, SessionConfig, clock.Clock) {

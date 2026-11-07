@@ -345,5 +345,12 @@ func TestCredentialService_WiringAndDefaults(t *testing.T) {
 		if gotClk != fakeClk {
 			t.Errorf("expected injected fakeClk %v, got %v", fakeClk, gotClk)
 		}
+		if instance.Sessions == nil {
+			t.Fatal("expected non-nil instance.Sessions")
+		}
+		gotSessions := kagi.CredentialServiceSessionServiceForTest(instance.Credentials)
+		if gotSessions != instance.Sessions {
+			t.Errorf("expected CredentialService to have SessionService %v, got %v", instance.Sessions, gotSessions)
+		}
 	})
 }

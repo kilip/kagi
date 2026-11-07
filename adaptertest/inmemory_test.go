@@ -2,699 +2,213 @@ package adaptertest_test
 
 import (
 	"context"
-	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/kilip/kagi"
+	"github.com/kilip/kagi/adapter/memory"
 )
 
+// memoryUserStore wraps *memory.UserStore.
 type memoryUserStore struct {
-	mu           sync.RWMutex
-	seq          uint64
-	usersByID    map[string]*kagi.User
-	usersByEmail map[string]*kagi.User
+	*memory.UserStore
 }
 
 func newMemoryUserStore() *memoryUserStore {
 	return &memoryUserStore{
-		usersByID:    make(map[string]*kagi.User),
-		usersByEmail: make(map[string]*kagi.User),
+		UserStore: memory.NewUserStore(),
 	}
 }
 
-func (s *memoryUserStore) Create(ctx context.Context, u *kagi.User) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, exists := s.usersByEmail[u.Email]; exists {
-		return kagi.ErrEmailAlreadyExists
-	}
-
-	id := strconv.FormatUint(atomic.AddUint64(&s.seq, 1), 10)
-	now := time.Now().UTC()
-	if u.CreatedAt.IsZero() {
-		u.CreatedAt = now
-	}
-	if u.UpdatedAt.IsZero() {
-		u.UpdatedAt = now
-	}
-	u.ID = id
-
-	cloned := *u
-	s.usersByID[id] = &cloned
-	s.usersByEmail[u.Email] = &cloned
-	return nil
-}
-
-func (s *memoryUserStore) GetByID(ctx context.Context, id string) (*kagi.User, error) {
-	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
-		return nil, kagi.ErrUserNotFound
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	u, exists := s.usersByID[id]
-	if !exists {
-		return nil, kagi.ErrUserNotFound
-	}
-	cloned := *u
-	return &cloned, nil
-}
-
-func (s *memoryUserStore) GetByEmail(ctx context.Context, email string) (*kagi.User, error) {
-	if email == "" {
-		return nil, kagi.ErrUserNotFound
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	u, exists := s.usersByEmail[email]
-	if !exists {
-		return nil, kagi.ErrUserNotFound
-	}
-	cloned := *u
-	return &cloned, nil
-}
-
-func (s *memoryUserStore) Update(ctx context.Context, u *kagi.User) error {
-	if _, err := strconv.ParseUint(u.ID, 10, 64); err != nil {
-		return kagi.ErrUserNotFound
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existing, exists := s.usersByID[u.ID]
-	if !exists {
-		return kagi.ErrUserNotFound
-	}
-
-	if u.Email != existing.Email {
-		if _, emailTaken := s.usersByEmail[u.Email]; emailTaken {
-			return kagi.ErrEmailAlreadyExists
-		}
-		delete(s.usersByEmail, existing.Email)
-	}
-
-	now := time.Now().UTC()
-	if u.UpdatedAt.IsZero() || u.UpdatedAt.Equal(existing.UpdatedAt) {
-		u.UpdatedAt = now
-	}
-
-	cloned := *u
-	s.usersByID[u.ID] = &cloned
-	s.usersByEmail[u.Email] = &cloned
-	return nil
-}
-
-func (s *memoryUserStore) Delete(ctx context.Context, id string) error {
-	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
-		return kagi.ErrUserNotFound
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existing, exists := s.usersByID[id]
-	if !exists {
-		return kagi.ErrUserNotFound
-	}
-
-	delete(s.usersByID, id)
-	delete(s.usersByEmail, existing.Email)
-	return nil
-}
-
+// memoryAccountStore wraps *memory.AccountStore.
 type memoryAccountStore struct {
-	mu               sync.RWMutex
-	seq              uint64
-	accountsByID     map[string]*kagi.Account
-	accountsByProv   map[string]*kagi.Account
-	accountsByUserID map[string][]*kagi.Account
+	*memory.AccountStore
 }
 
 func newMemoryAccountStore() *memoryAccountStore {
 	return &memoryAccountStore{
-		accountsByID:     make(map[string]*kagi.Account),
-		accountsByProv:   make(map[string]*kagi.Account),
-		accountsByUserID: make(map[string][]*kagi.Account),
+		AccountStore: memory.NewAccountStore(),
 	}
 }
 
-func accountKey(provider, providerAccountID string) string {
-	return provider + ":" + providerAccountID
+// memorySessionStore wraps *memory.SessionStore and tracks created sessions
+// to allow deliberate mutation in failure-capture tests.
+type memorySessionStore struct {
+	*memory.SessionStore
+	mu             sync.RWMutex
+	storedSessions map[string]*kagi.Session // tokenHash -> session copy
 }
 
-func (s *memoryAccountStore) Create(ctx context.Context, a *kagi.Account) error {
+func newMemorySessionStore() *memorySessionStore {
+	return &memorySessionStore{
+		SessionStore:   memory.NewSessionStore(),
+		storedSessions: make(map[string]*kagi.Session),
+	}
+}
+
+func (s *memorySessionStore) Create(ctx context.Context, sess *kagi.Session) error {
+	if err := s.SessionStore.Create(ctx, sess); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	key := accountKey(a.Provider, a.ProviderAccountID)
-	if _, exists := s.accountsByProv[key]; exists {
-		return kagi.ErrAccountAlreadyExists
-	}
-
-	id := strconv.FormatUint(atomic.AddUint64(&s.seq, 1), 10)
-	now := time.Now().UTC()
-	if a.CreatedAt.IsZero() {
-		a.CreatedAt = now
-	}
-	if a.UpdatedAt.IsZero() {
-		a.UpdatedAt = now
-	}
-	a.ID = id
-
-	cloned := *a
-	s.accountsByID[id] = &cloned
-	s.accountsByProv[key] = &cloned
-	s.accountsByUserID[a.UserID] = append(s.accountsByUserID[a.UserID], &cloned)
+	cloned := *sess
+	s.storedSessions[sess.TokenHash] = &cloned
 	return nil
 }
 
-func (s *memoryAccountStore) GetByProvider(ctx context.Context, provider, providerAccountID string) (*kagi.Account, error) {
-	if provider == "" || providerAccountID == "" {
-		return nil, kagi.ErrAccountNotFound
-	}
-
+func (s *memorySessionStore) GetByTokenHash(ctx context.Context, tokenHash string) (*kagi.Session, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	key := accountKey(provider, providerAccountID)
-	a, exists := s.accountsByProv[key]
-	if !exists {
-		return nil, kagi.ErrAccountNotFound
+	sess, exists := s.storedSessions[tokenHash]
+	s.mu.RUnlock()
+	if exists {
+		now := time.Now().UTC()
+		if !sess.ExpiresAt.After(now) {
+			return nil, kagi.ErrSessionNotFound
+		}
+		cloned := *sess
+		return &cloned, nil
 	}
-	cloned := *a
-	return &cloned, nil
+	return s.SessionStore.GetByTokenHash(ctx, tokenHash)
 }
-
-func (s *memoryAccountStore) ListByUserID(ctx context.Context, userID string) ([]*kagi.Account, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	list := s.accountsByUserID[userID]
-	if len(list) == 0 {
-		return []*kagi.Account{}, nil
+func (s *memorySessionStore) Update(ctx context.Context, sess *kagi.Session) error {
+	if err := s.SessionStore.Update(ctx, sess); err != nil {
+		return err
 	}
-
-	result := make([]*kagi.Account, len(list))
-	for i, a := range list {
-		cloned := *a
-		result[i] = &cloned
-	}
-	return result, nil
-}
-
-func (s *memoryAccountStore) CountByUserID(ctx context.Context, userID string) (int, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	return len(s.accountsByUserID[userID]), nil
-}
-
-func (s *memoryAccountStore) Update(ctx context.Context, a *kagi.Account) error {
-	if _, err := strconv.ParseUint(a.ID, 10, 64); err != nil {
-		return kagi.ErrAccountNotFound
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	cloned := *sess
+	s.storedSessions[sess.TokenHash] = &cloned
+	return nil
+}
 
-	existing, exists := s.accountsByID[a.ID]
-	if !exists {
-		return kagi.ErrAccountNotFound
+func (s *memorySessionStore) UpdateTokenHash(ctx context.Context, id, oldTokenHash, newTokenHash string, expiresAt time.Time) error {
+	if err := s.SessionStore.UpdateTokenHash(ctx, id, oldTokenHash, newTokenHash, expiresAt); err != nil {
+		return err
 	}
-
-	oldKey := accountKey(existing.Provider, existing.ProviderAccountID)
-	newKey := accountKey(a.Provider, a.ProviderAccountID)
-	if oldKey != newKey {
-		if _, taken := s.accountsByProv[newKey]; taken {
-			return kagi.ErrAccountAlreadyExists
-		}
-		delete(s.accountsByProv, oldKey)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing, exists := s.storedSessions[oldTokenHash]; exists {
+		delete(s.storedSessions, oldTokenHash)
+		existing.TokenHash = newTokenHash
+		existing.ExpiresAt = expiresAt
+		existing.Pending2FA = false
+		s.storedSessions[newTokenHash] = existing
 	}
+	return nil
+}
 
-	now := time.Now().UTC()
-	if a.UpdatedAt.IsZero() || a.UpdatedAt.Equal(existing.UpdatedAt) {
-		a.UpdatedAt = now
+func (s *memorySessionStore) DeleteByID(ctx context.Context, id string) (string, error) {
+	th, err := s.SessionStore.DeleteByID(ctx, id)
+	if err != nil {
+		return "", err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.storedSessions, th)
+	return th, nil
+}
 
-	cloned := *a
-	s.accountsByID[a.ID] = &cloned
-	s.accountsByProv[newKey] = &cloned
+func (s *memorySessionStore) DeleteByTokenHash(ctx context.Context, tokenHash string) error {
+	if err := s.SessionStore.DeleteByTokenHash(ctx, tokenHash); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.storedSessions, tokenHash)
+	return nil
+}
+func (s *memorySessionStore) DeleteByUserID(ctx context.Context, userID string) ([]string, error) {
+	deletedHashes, err := s.SessionStore.DeleteByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, th := range deletedHashes {
+		delete(s.storedSessions, th)
+	}
+	return deletedHashes, nil
+}
 
-	// Update in user list
-	userList := s.accountsByUserID[existing.UserID]
-	for i, item := range userList {
-		if item.ID == a.ID {
-			userList[i] = &cloned
+func (s *memorySessionStore) DeleteOthersByUserID(ctx context.Context, userID, currentSessionID string) ([]string, error) {
+	deletedHashes, err := s.SessionStore.DeleteOthersByUserID(ctx, userID, currentSessionID)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, th := range deletedHashes {
+		delete(s.storedSessions, th)
+	}
+	return deletedHashes, nil
+}
+
+// memoryVerificationStore wraps *memory.VerificationStore and tracks created verifications
+// to allow deliberate expiry bypass in failure-capture tests.
+type memoryVerificationStore struct {
+	*memory.VerificationStore
+	mu            sync.RWMutex
+	storedRecords map[string]*kagi.Verification // target:type -> verification copy
+}
+
+func newMemoryVerificationStore() *memoryVerificationStore {
+	return &memoryVerificationStore{
+		VerificationStore: memory.NewVerificationStore(),
+		storedRecords:     make(map[string]*kagi.Verification),
+	}
+}
+
+func (s *memoryVerificationStore) Create(ctx context.Context, v *kagi.Verification) error {
+	if err := s.VerificationStore.Create(ctx, v); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := v.Target + ":" + string(v.Type)
+	cloned := *v
+	s.storedRecords[key] = &cloned
+	return nil
+}
+
+func (s *memoryVerificationStore) Update(ctx context.Context, v *kagi.Verification) error {
+	if err := s.VerificationStore.Update(ctx, v); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := v.Target + ":" + string(v.Type)
+	cloned := *v
+	s.storedRecords[key] = &cloned
+	return nil
+}
+
+func (s *memoryVerificationStore) Delete(ctx context.Context, id string) error {
+	if err := s.VerificationStore.Delete(ctx, id); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, record := range s.storedRecords {
+		if record.ID == id {
+			delete(s.storedRecords, key)
 			break
 		}
 	}
 	return nil
 }
 
-func (s *memoryAccountStore) Delete(ctx context.Context, id string) error {
-	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
-		return kagi.ErrAccountNotFound
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existing, exists := s.accountsByID[id]
-	if !exists {
-		return kagi.ErrAccountNotFound
-	}
-
-	delete(s.accountsByID, id)
-	delete(s.accountsByProv, accountKey(existing.Provider, existing.ProviderAccountID))
-
-	// Remove from user list
-	userList := s.accountsByUserID[existing.UserID]
-	updated := make([]*kagi.Account, 0, len(userList)-1)
-	for _, item := range userList {
-		if item.ID != id {
-			updated = append(updated, item)
-		}
-	}
-	s.accountsByUserID[existing.UserID] = updated
-	return nil
-}
-
-// memorySessionStore implements kagi.SessionStore with in-memory persistence.
-type memorySessionStore struct {
-	mu           sync.RWMutex
-	seq          uint64
-	sessionsByID map[string]*kagi.Session
-	sessionsByTH map[string]*kagi.Session
-}
-
-func newMemorySessionStore() *memorySessionStore {
-	return &memorySessionStore{
-		sessionsByID: make(map[string]*kagi.Session),
-		sessionsByTH: make(map[string]*kagi.Session),
-	}
-}
-
-func (s *memorySessionStore) Create(ctx context.Context, sess *kagi.Session) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	id := strconv.FormatUint(atomic.AddUint64(&s.seq, 1), 10)
-	now := time.Now().UTC()
-	if sess.CreatedAt.IsZero() {
-		sess.CreatedAt = now
-	}
-	if sess.UpdatedAt.IsZero() {
-		sess.UpdatedAt = now
-	}
-	sess.ID = id
-
-	cloned := *sess
-	s.sessionsByID[id] = &cloned
-	s.sessionsByTH[sess.TokenHash] = &cloned
-	return nil
-}
-
-func (s *memorySessionStore) GetByTokenHash(ctx context.Context, tokenHash string) (*kagi.Session, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	sess, exists := s.sessionsByTH[tokenHash]
-	if !exists {
-		return nil, kagi.ErrSessionNotFound
-	}
-
-	now := time.Now().UTC()
-	if !sess.ExpiresAt.After(now) {
-		return nil, kagi.ErrSessionNotFound
-	}
-
-	cloned := *sess
-	return &cloned, nil
-}
-
-func (s *memorySessionStore) Update(ctx context.Context, sess *kagi.Session) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existing, exists := s.sessionsByID[sess.ID]
-	if !exists {
-		return kagi.ErrSessionNotFound
-	}
-
-	now := time.Now().UTC()
-	if !existing.ExpiresAt.After(now) {
-		return kagi.ErrSessionNotFound
-	}
-
-	cloned := *sess
-	cloned.CreatedAt = existing.CreatedAt // Preserve CreatedAt absolute ceiling
-	if cloned.UpdatedAt.IsZero() || cloned.UpdatedAt.Equal(existing.UpdatedAt) {
-		cloned.UpdatedAt = now
-	}
-
-	if existing.TokenHash != cloned.TokenHash {
-		delete(s.sessionsByTH, existing.TokenHash)
-	}
-
-	s.sessionsByID[cloned.ID] = &cloned
-	s.sessionsByTH[cloned.TokenHash] = &cloned
-	return nil
-}
-
-func (s *memorySessionStore) UpdateTokenHash(ctx context.Context, id, oldTokenHash, newTokenHash string, expiresAt time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existing, exists := s.sessionsByID[id]
-	if !exists {
-		return kagi.ErrSessionNotFound
-	}
-
-	if existing.TokenHash != oldTokenHash {
-		return kagi.ErrSessionNotFound
-	}
-
-	now := time.Now().UTC()
-	if !existing.ExpiresAt.After(now) {
-		return kagi.ErrSessionNotFound
-	}
-
-	delete(s.sessionsByTH, oldTokenHash)
-
-	existing.TokenHash = newTokenHash
-	existing.ExpiresAt = expiresAt
-	existing.Pending2FA = false // Mandatory 2FA graduation reset (ADR-0014)
-	existing.UpdatedAt = now
-	// CreatedAt remains untouched
-
-	s.sessionsByTH[newTokenHash] = existing
-	return nil
-}
-
-func (s *memorySessionStore) DeleteByID(ctx context.Context, id string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existing, exists := s.sessionsByID[id]
-	if !exists {
-		return "", kagi.ErrSessionNotFound
-	}
-
-	now := time.Now().UTC()
-	if !existing.ExpiresAt.After(now) {
-		return "", kagi.ErrSessionNotFound
-	}
-
-	th := existing.TokenHash
-	delete(s.sessionsByID, id)
-	delete(s.sessionsByTH, th)
-	return th, nil
-}
-
-func (s *memorySessionStore) DeleteByTokenHash(ctx context.Context, tokenHash string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existing, exists := s.sessionsByTH[tokenHash]
-	if !exists {
-		return kagi.ErrSessionNotFound
-	}
-
-	now := time.Now().UTC()
-	if !existing.ExpiresAt.After(now) {
-		return kagi.ErrSessionNotFound
-	}
-
-	delete(s.sessionsByID, existing.ID)
-	delete(s.sessionsByTH, tokenHash)
-	return nil
-}
-
-func (s *memorySessionStore) DeleteByUserID(ctx context.Context, userID string) ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var deletedHashes []string
-	for id, sess := range s.sessionsByID {
-		if sess.UserID == userID {
-			deletedHashes = append(deletedHashes, sess.TokenHash)
-			delete(s.sessionsByTH, sess.TokenHash)
-			delete(s.sessionsByID, id)
-		}
-	}
-
-	if len(deletedHashes) == 0 {
-		return nil, nil // Bulk no-op returns nil, nil (ADR-0014)
-	}
-
-	return deletedHashes, nil
-}
-
-func (s *memorySessionStore) DeleteOthersByUserID(ctx context.Context, userID, currentSessionID string) ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var deletedHashes []string
-	for id, sess := range s.sessionsByID {
-		if sess.UserID == userID && id != currentSessionID {
-			deletedHashes = append(deletedHashes, sess.TokenHash)
-			delete(s.sessionsByTH, sess.TokenHash)
-			delete(s.sessionsByID, id)
-		}
-	}
-
-	if len(deletedHashes) == 0 {
-		return nil, nil // Bulk no-op returns nil, nil (ADR-0014)
-	}
-
-	return deletedHashes, nil
-}
-
-func (s *memorySessionStore) ListByUserID(ctx context.Context, userID string) ([]*kagi.Session, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	now := time.Now().UTC()
-	result := make([]*kagi.Session, 0)
-	for _, sess := range s.sessionsByID {
-		// Filter: user_id = $userID AND expires_at > now AND pending_2fa = false (ADR-0014)
-		if sess.UserID == userID && sess.ExpiresAt.After(now) && !sess.Pending2FA {
-			cloned := *sess
-			result = append(result, &cloned)
-		}
-	}
-
-	return result, nil
-}
-
-func (s *memorySessionStore) DeleteExpired(ctx context.Context, batchSize int) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now().UTC()
-	var toDelete []string
-	for id, sess := range s.sessionsByID {
-		if !sess.ExpiresAt.After(now) {
-			toDelete = append(toDelete, id)
-			if len(toDelete) >= batchSize {
-				break
-			}
-		}
-	}
-
-	for _, id := range toDelete {
-		sess := s.sessionsByID[id]
-		delete(s.sessionsByTH, sess.TokenHash)
-		delete(s.sessionsByID, id)
-	}
-
-	return len(toDelete), nil
-}
-
-// memoryVerificationStore implements kagi.VerificationStore with in-memory persistence.
-type memoryVerificationStore struct {
-	mu           sync.RWMutex
-	seq          uint64
-	recordsByID  map[string]*kagi.Verification
-	recordsByKey map[string]*kagi.Verification
-}
-
-func newMemoryVerificationStore() *memoryVerificationStore {
-	return &memoryVerificationStore{
-		recordsByID:  make(map[string]*kagi.Verification),
-		recordsByKey: make(map[string]*kagi.Verification),
-	}
-}
-
-func verificationKey(target string, vType kagi.VerificationType) string {
-	return target + ":" + string(vType)
-}
-
-func (s *memoryVerificationStore) Create(ctx context.Context, v *kagi.Verification) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	id := strconv.FormatUint(atomic.AddUint64(&s.seq, 1), 10)
-	now := time.Now().UTC()
-	if v.CreatedAt.IsZero() {
-		v.CreatedAt = now
-	}
-	if v.UpdatedAt.IsZero() {
-		v.UpdatedAt = now
-	}
-	v.ID = id
-
-	cloned := *v
-	key := verificationKey(v.Target, v.Type)
-	s.recordsByID[id] = &cloned
-	s.recordsByKey[key] = &cloned
-	return nil
-}
-
-func (s *memoryVerificationStore) Get(ctx context.Context, target string, vType kagi.VerificationType) (*kagi.Verification, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	key := verificationKey(target, vType)
-	v, exists := s.recordsByKey[key]
-	if !exists {
-		return nil, kagi.ErrVerificationNotFound
-	}
-
-	now := time.Now().UTC()
-	if !v.ExpiresAt.After(now) {
-		return nil, kagi.ErrVerificationNotFound
-	}
-
-	cloned := *v
-	return &cloned, nil
-}
-
-func (s *memoryVerificationStore) Update(ctx context.Context, v *kagi.Verification) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existing, exists := s.recordsByID[v.ID]
-	if !exists {
-		return kagi.ErrVerificationNotFound
-	}
-
-	now := time.Now().UTC()
-	if !existing.ExpiresAt.After(now) {
-		return kagi.ErrVerificationNotFound
-	}
-
-	oldKey := verificationKey(existing.Target, existing.Type)
-	newKey := verificationKey(v.Target, v.Type)
-	if oldKey != newKey {
-		delete(s.recordsByKey, oldKey)
-	}
-
-	cloned := *v
-	if cloned.UpdatedAt.IsZero() || cloned.UpdatedAt.Equal(existing.UpdatedAt) {
-		cloned.UpdatedAt = now
-	}
-
-	s.recordsByID[cloned.ID] = &cloned
-	s.recordsByKey[newKey] = &cloned
-	return nil
-}
-
-func (s *memoryVerificationStore) Delete(ctx context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existing, exists := s.recordsByID[id]
-	if !exists {
-		return kagi.ErrVerificationNotFound
-	}
-
-	delete(s.recordsByID, id)
-	delete(s.recordsByKey, verificationKey(existing.Target, existing.Type))
-	return nil
-}
-
-func (s *memoryVerificationStore) DeleteExpired(ctx context.Context, batchSize int) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now().UTC()
-	var toDelete []string
-	for id, v := range s.recordsByID {
-		if !v.ExpiresAt.After(now) {
-			toDelete = append(toDelete, id)
-			if len(toDelete) >= batchSize {
-				break
-			}
-		}
-	}
-
-	for _, id := range toDelete {
-		v := s.recordsByID[id]
-		delete(s.recordsByKey, verificationKey(v.Target, v.Type))
-		delete(s.recordsByID, id)
-	}
-
-	return len(toDelete), nil
-}
-
+// memoryRateLimitStore wraps *memory.RateLimitStore and tracks entries
+// to allow deliberate lack of reset in failure-capture tests.
 type memoryRateLimitStore struct {
-	mu      sync.Mutex
-	entries map[string]*kagi.RateLimitEntry
+	*memory.RateLimitStore
+	mu            sync.Mutex
+	storedEntries map[string]*kagi.RateLimitEntry
 }
 
 func newMemoryRateLimitStore() *memoryRateLimitStore {
 	return &memoryRateLimitStore{
-		entries: make(map[string]*kagi.RateLimitEntry),
+		RateLimitStore: memory.NewRateLimitStore(),
+		storedEntries:  make(map[string]*kagi.RateLimitEntry),
 	}
-}
-
-func (s *memoryRateLimitStore) Increment(ctx context.Context, key string, window time.Duration) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now().UTC()
-	entry, exists := s.entries[key]
-	if !exists || !entry.ExpiresAt.After(now) {
-		// Reset or initialize: count = 1, expires_at = now + window
-		s.entries[key] = &kagi.RateLimitEntry{
-			Key:       key,
-			Count:     1,
-			ExpiresAt: now.Add(window),
-		}
-		return 1, nil
-	}
-
-	// Active: increment count, preserve expires_at
-	entry.Count++
-	return entry.Count, nil
-}
-
-func (s *memoryRateLimitStore) DeleteExpired(ctx context.Context, batchSize int) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now().UTC()
-	var toDelete []string
-	for key, entry := range s.entries {
-		if !entry.ExpiresAt.After(now) {
-			toDelete = append(toDelete, key)
-			if len(toDelete) >= batchSize {
-				break
-			}
-		}
-	}
-
-	for _, key := range toDelete {
-		delete(s.entries, key)
-	}
-
-	return len(toDelete), nil
 }

@@ -222,7 +222,7 @@ type brokenSessionStoreExpiryOnRead struct {
 func (b *brokenSessionStoreExpiryOnRead) GetByTokenHash(ctx context.Context, tokenHash string) (*kagi.Session, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	sess, exists := b.sessionsByTH[tokenHash]
+	sess, exists := b.storedSessions[tokenHash]
 	if !exists {
 		return nil, kagi.ErrSessionNotFound
 	}
@@ -230,7 +230,6 @@ func (b *brokenSessionStoreExpiryOnRead) GetByTokenHash(ctx context.Context, tok
 	cloned := *sess
 	return &cloned, nil
 }
-
 func TestSessionStore_ExpiryOnRead_FailureCapture(t *testing.T) {
 	spy := &spyTB{}
 	broken := &brokenSessionStoreExpiryOnRead{memorySessionStore: newMemorySessionStore()}
@@ -254,19 +253,24 @@ type brokenSessionStoreFailingCAS struct {
 func (b *brokenSessionStoreFailingCAS) UpdateTokenHash(ctx context.Context, id, oldTokenHash, newTokenHash string, expiresAt time.Time) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	existing, exists := b.sessionsByID[id]
-	if !exists {
+	var found *kagi.Session
+	for _, sess := range b.storedSessions {
+		if sess.ID == id {
+			found = sess
+			break
+		}
+	}
+	if found == nil {
 		return kagi.ErrSessionNotFound
 	}
 	// Deliberately omits existing.TokenHash != oldTokenHash CAS check!
-	delete(b.sessionsByTH, existing.TokenHash)
-	existing.TokenHash = newTokenHash
-	existing.ExpiresAt = expiresAt
-	existing.Pending2FA = false
-	b.sessionsByTH[newTokenHash] = existing
+	delete(b.storedSessions, found.TokenHash)
+	found.TokenHash = newTokenHash
+	found.ExpiresAt = expiresAt
+	found.Pending2FA = false
+	b.storedSessions[newTokenHash] = found
 	return nil
 }
-
 func TestSessionStore_CAS_FailureCapture(t *testing.T) {
 	spy := &spyTB{}
 	broken := &brokenSessionStoreFailingCAS{memorySessionStore: newMemorySessionStore()}
@@ -312,14 +316,13 @@ func (b *brokenVerificationStoreNoExpiry) Get(ctx context.Context, target string
 	b.memoryVerificationStore.mu.RLock()
 	defer b.memoryVerificationStore.mu.RUnlock()
 
-	v, exists := b.memoryVerificationStore.recordsByKey[key]
+	v, exists := b.memoryVerificationStore.storedRecords[key]
 	if !exists {
 		return nil, kagi.ErrVerificationNotFound
 	}
 	cloned := *v
 	return &cloned, nil
 }
-
 func TestVerificationStore_FailureCapture(t *testing.T) {
 	spy := &spyTB{}
 	broken := &brokenVerificationStoreNoExpiry{memoryVerificationStore: newMemoryVerificationStore()}
@@ -343,13 +346,14 @@ func (b *brokenRateLimitStoreNoReset) Increment(ctx context.Context, key string,
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	entry, exists := b.entries[key]
+	entry, exists := b.storedEntries[key]
 	if !exists {
-		b.entries[key] = &kagi.RateLimitEntry{
+		entry = &kagi.RateLimitEntry{
 			Key:       key,
 			Count:     1,
 			ExpiresAt: time.Now().UTC().Add(window),
 		}
+		b.storedEntries[key] = entry
 		return 1, nil
 	}
 
@@ -357,7 +361,6 @@ func (b *brokenRateLimitStoreNoReset) Increment(ctx context.Context, key string,
 	entry.Count++
 	return entry.Count, nil
 }
-
 func TestRateLimitStore_FailureCapture(t *testing.T) {
 	spy := &spyTB{}
 	broken := &brokenRateLimitStoreNoReset{

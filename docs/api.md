@@ -733,3 +733,49 @@ func TestKagiUserStore_Conformance(t *testing.T) {
 	adaptertest.RunUserStoreTests(t, store)
 }
 ```
+---
+
+## In-Memory Reference Adapter (`adapter/memory`)
+
+Kagi provides a canonical, zero-dependency, thread-safe in-memory storage adapter under `github.com/kilip/kagi/adapter/memory`.
+
+### Purpose
+
+- **Fast unit & integration tests:** Spin up fully functional stores in tests without external databases (PostgreSQL, MySQL, SQLite, or Redis) or Docker containers.
+- **Local development & prototyping:** Develop application features and web prototypes instantly with zero infrastructure setup.
+- **Reference implementation:** Provides adapter authors with an exemplary, fully compliant implementation satisfying all 5 primary store ports and `adaptertest.RunAll`.
+
+### Concurrency & Thread-Safety Guarantees
+
+- **Fine-grained synchronization:** Implements mutex-protected storage (`sync.RWMutex` for `UserStore`, `AccountStore`, `SessionStore`, and `VerificationStore`; `sync.Mutex` for `RateLimitStore`).
+- **Atomic Compare-And-Swap (CAS):** `SessionStore.UpdateTokenHash` guarantees thread-safe token rotations where concurrent calls against the same `oldTokenHash` resolve with exactly 1 winner, returning `ErrSessionNotFound` to all others.
+- **Atomic Rate-Limiting:** `RateLimitStore.Increment` performs atomic increments under high concurrency without lost updates.
+- **Defensive Cloning:** Domain entity inputs and outputs are deeply copied across method boundaries to protect internal state against concurrent caller modifications.
+
+### Usage Example
+
+```go
+package main
+
+import (
+	"testing"
+
+	"github.com/kilip/kagi/adapter/memory"
+	"github.com/kilip/kagi/adaptertest"
+)
+
+func TestWithMemoryAdapter(t *testing.T) {
+	// Initialize the complete in-memory store bundle
+	stores := memory.New()
+
+	// Run full conformance suite across all 5 stores
+	adaptertest.RunAll(t, stores.AsAdaptertestStores())
+
+	// Alternatively, access individual stores:
+	// stores.User         (*memory.UserStore)
+	// stores.Account      (*memory.AccountStore)
+	// stores.Session      (*memory.SessionStore)
+	// stores.Verification (*memory.VerificationStore)
+	// stores.RateLimit    (*memory.RateLimitStore)
+}
+```

@@ -2,6 +2,7 @@ package kagi
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/kilip/kagi/internal/clock"
@@ -143,7 +144,94 @@ func (s *SessionService) createSession(ctx context.Context, userID string, pendi
 // Validate checks the session token, verifies constant-time hash, executes sliding renewal
 // when within the renewal threshold, and rejects pending-2FA sessions with ErrSessionPending2FA.
 func (s *SessionService) Validate(ctx context.Context, rawToken string) (*Session, bool, error) {
-	return nil, false, nil
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+
+	if err := crypto.ValidateSessionTokenFormat(rawToken); err != nil {
+		return nil, false, ErrInvalidSessionToken
+	}
+
+	tokenHash := crypto.HashToken(rawToken)
+	now := s.clock.Now().UTC()
+
+	var (
+		sess      *Session
+		fromStore bool
+	)
+
+	if s.secondary != nil {
+		cached, err := s.secondary.GetSession(ctx, tokenHash)
+		if err == nil && cached != nil {
+			if !crypto.ConstantTimeCompare(cached.TokenHash, tokenHash) {
+				return nil, false, ErrSessionNotFound
+			}
+			if !cached.ExpiresAt.After(now) {
+				return nil, false, ErrSessionNotFound
+			}
+			if cached.Pending2FA {
+				return nil, false, ErrSessionPending2FA
+			}
+			sess = cached
+		}
+	}
+
+	if sess == nil {
+		stored, err := s.store.GetByTokenHash(ctx, tokenHash)
+		if err != nil {
+			if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrSessionExpired) {
+				return nil, false, ErrSessionNotFound
+			}
+			return nil, false, err
+		}
+		if stored == nil {
+			return nil, false, ErrSessionNotFound
+		}
+		if !crypto.ConstantTimeCompare(stored.TokenHash, tokenHash) {
+			return nil, false, ErrSessionNotFound
+		}
+		if stored.Pending2FA {
+			return nil, false, ErrSessionPending2FA
+		}
+		if !stored.ExpiresAt.After(now) {
+			return nil, false, ErrSessionNotFound
+		}
+		sess = stored
+		fromStore = true
+	}
+
+	remaining := sess.ExpiresAt.Sub(now)
+	thresholdDuration := time.Duration(float64(s.config.IdleTimeout) * s.config.RenewalThreshold)
+	if remaining <= thresholdDuration {
+		newExpiresAt := now.Add(s.config.IdleTimeout)
+		absMax := sess.CreatedAt.Add(s.config.AbsoluteTimeout)
+		if newExpiresAt.After(absMax) {
+			newExpiresAt = absMax
+		}
+		if newExpiresAt.After(sess.ExpiresAt) {
+			sess.ExpiresAt = newExpiresAt
+			sess.UpdatedAt = now
+			if err := s.store.Update(ctx, sess); err != nil {
+				return nil, false, err
+			}
+			if s.secondary != nil {
+				ttl := sess.ExpiresAt.Sub(now)
+				if err := s.secondary.SetSession(ctx, sess, ttl); err != nil {
+					return nil, false, err
+				}
+			}
+			return sess, true, nil
+		}
+	}
+
+	if fromStore && s.secondary != nil && !sess.Pending2FA {
+		ttl := sess.ExpiresAt.Sub(now)
+		if ttl > 0 {
+			_ = s.secondary.SetSession(ctx, sess, ttl)
+		}
+	}
+
+	return sess, false, nil
 }
 
 // Rotate generates a new 256-bit opaque token while preserving CreatedAt (AbsoluteTimeout ceiling).

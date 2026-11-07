@@ -476,3 +476,610 @@ func TestSignOut(t *testing.T) {
 		}
 	})
 }
+
+func TestValidate(t *testing.T) {
+	t.Parallel()
+
+	fixedTime := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+
+	t.Run("context cancelled returns error", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		validRawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+
+		sess, renewed, err := svc.Validate(ctx, validRawToken)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+		if sess != nil || renewed {
+			t.Fatalf("expected nil session and false renewed, got sess=%v, renewed=%v", sess, renewed)
+		}
+	})
+
+	t.Run("invalid token format rejects without database query", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		svc := kagi.NewSessionService(mockStore, mockSec, kagi.DefaultSessionConfig(), fakeClk)
+
+		// Store and secondary must never be queried
+		invalidTokens := []string{
+			"",
+			"too-short",
+			strings.Repeat("a", 42),
+			strings.Repeat("a", 44),
+			strings.Repeat("a", 42) + "=",
+			strings.Repeat("a", 42) + "@",
+			strings.Repeat("a", 42) + "+",
+			strings.Repeat("a", 42) + "/",
+		}
+
+		for _, tok := range invalidTokens {
+			sess, renewed, err := svc.Validate(context.Background(), tok)
+			if !errors.Is(err, kagi.ErrInvalidSessionToken) {
+				t.Errorf("token %q: expected ErrInvalidSessionToken, got %v", tok, err)
+			}
+			if sess != nil || renewed {
+				t.Errorf("token %q: expected nil session and false renewed, got sess=%v, renewed=%v", tok, sess, renewed)
+			}
+		}
+	})
+
+	t.Run("nonexistent token returns ErrSessionNotFound", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		memStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		svc := kagi.NewSessionService(memStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound, got %v", err)
+		}
+		if sess != nil || renewed {
+			t.Fatalf("expected nil session and false renewed, got sess=%v, renewed=%v", sess, renewed)
+		}
+	})
+
+	t.Run("primary store ErrSessionExpired returns ErrSessionNotFound", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(nil, kagi.ErrSessionExpired).Times(1)
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound, got %v", err)
+		}
+		if sess != nil || renewed {
+			t.Fatalf("expected nil session and false renewed, got sess=%v, renewed=%v", sess, renewed)
+		}
+	})
+
+	t.Run("expired token returns ErrSessionNotFound on read check", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		// Store returns a session whose ExpiresAt is in the past
+		expiredSession := &kagi.Session{
+			ID:        "sess-expired",
+			UserID:    "user-1",
+			TokenHash: tokenHash,
+			ExpiresAt: fixedTime.Add(-1 * time.Second),
+			CreatedAt: fixedTime.Add(-10 * time.Minute),
+			UpdatedAt: fixedTime.Add(-10 * time.Minute),
+		}
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(expiredSession, nil).Times(1)
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound, got %v", err)
+		}
+		if sess != nil || renewed {
+			t.Fatalf("expected nil session and false renewed, got sess=%v, renewed=%v", sess, renewed)
+		}
+	})
+
+	t.Run("pending 2FA session returns ErrSessionPending2FA", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		memStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		svc := kagi.NewSessionService(memStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		created, rawToken, err := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user-2fa", true, "127.0.0.1", "test-agent")
+		if err != nil {
+			t.Fatalf("failed to create pending 2FA session: %v", err)
+		}
+		if !created.Pending2FA {
+			t.Fatalf("expected pending 2FA to be true")
+		}
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionPending2FA) {
+			t.Fatalf("expected ErrSessionPending2FA, got %v", err)
+		}
+		if sess != nil || renewed {
+			t.Fatalf("expected nil session and false renewed, got sess=%v, renewed=%v", sess, renewed)
+		}
+	})
+
+	t.Run("constant time verification defends against token hash mismatch", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		// Store returns a session with different token hash (e.g. collation collision)
+		spoofedSession := &kagi.Session{
+			ID:        "sess-spoofed",
+			UserID:    "user-spoofed",
+			TokenHash: strings.Repeat("0", 64),
+			ExpiresAt: fixedTime.Add(7 * 24 * time.Hour),
+			CreatedAt: fixedTime,
+			UpdatedAt: fixedTime,
+		}
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(spoofedSession, nil).Times(1)
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound on hash mismatch, got %v", err)
+		}
+		if sess != nil || renewed {
+			t.Fatalf("expected nil session and false renewed, got sess=%v, renewed=%v", sess, renewed)
+		}
+	})
+
+	t.Run("sliding renewal triggers when remaining <= threshold and updates both tiers", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+
+		cfg := kagi.DefaultSessionConfig()
+		// IdleTimeout: 7 days, RenewalThreshold: 0.5 => thresholdDuration: 3.5 days.
+		// If remaining <= 3.5 days, renewal triggers.
+		svc := kagi.NewSessionService(mockStore, mockSec, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		// Session has 3 days remaining (<= 3.5 days)
+		existingSession := &kagi.Session{
+			ID:        "sess-renew",
+			UserID:    "user-renew",
+			TokenHash: tokenHash,
+			ExpiresAt: fixedTime.Add(3 * 24 * time.Hour),
+			CreatedAt: fixedTime.Add(-4 * 24 * time.Hour),
+			UpdatedAt: fixedTime.Add(-4 * 24 * time.Hour),
+		}
+
+		// Cache miss in secondary
+		mockSec.EXPECT().GetSession(gomock.Any(), tokenHash).Return(nil, nil).Times(1)
+		// Fallback to store
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(existingSession, nil).Times(1)
+
+		expectedNewExpiresAt := fixedTime.Add(cfg.IdleTimeout) // now + 7 days
+		mockStore.EXPECT().Update(gomock.Any(), gomock.AssignableToTypeOf(&kagi.Session{})).DoAndReturn(
+			func(_ context.Context, s *kagi.Session) error {
+				if !s.ExpiresAt.Equal(expectedNewExpiresAt) {
+					t.Errorf("expected new ExpiresAt %v, got %v", expectedNewExpiresAt, s.ExpiresAt)
+				}
+				if !s.UpdatedAt.Equal(fixedTime) {
+					t.Errorf("expected UpdatedAt %v, got %v", fixedTime, s.UpdatedAt)
+				}
+				return nil
+			},
+		).Times(1)
+
+		expectedTTL := expectedNewExpiresAt.Sub(fixedTime)
+		mockSec.EXPECT().SetSession(gomock.Any(), gomock.AssignableToTypeOf(&kagi.Session{}), expectedTTL).Return(nil).Times(1)
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if !renewed {
+			t.Fatalf("expected renewed == true")
+		}
+		if sess == nil || !sess.ExpiresAt.Equal(expectedNewExpiresAt) {
+			t.Fatalf("expected returned session with ExpiresAt %v, got %v", expectedNewExpiresAt, sess)
+		}
+	})
+
+	t.Run("sliding renewal does not trigger when remaining > threshold but backfills cache", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+
+		cfg := kagi.DefaultSessionConfig()
+		svc := kagi.NewSessionService(mockStore, mockSec, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		// Session has 5 days remaining (> 3.5 days threshold)
+		initialExpiresAt := fixedTime.Add(5 * 24 * time.Hour)
+		existingSession := &kagi.Session{
+			ID:        "sess-no-renew",
+			UserID:    "user-no-renew",
+			TokenHash: tokenHash,
+			ExpiresAt: initialExpiresAt,
+			CreatedAt: fixedTime.Add(-2 * 24 * time.Hour),
+			UpdatedAt: fixedTime.Add(-2 * 24 * time.Hour),
+		}
+
+		// Cache miss in secondary
+		mockSec.EXPECT().GetSession(gomock.Any(), tokenHash).Return(nil, nil).Times(1)
+		// Query primary store
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(existingSession, nil).Times(1)
+		// Store.Update must NOT be called
+		// Cache backfill is performed
+		mockSec.EXPECT().SetSession(gomock.Any(), existingSession, 5*24*time.Hour).Return(nil).Times(1)
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if renewed {
+			t.Fatalf("expected renewed == false")
+		}
+		if !sess.ExpiresAt.Equal(initialExpiresAt) {
+			t.Fatalf("expected ExpiresAt unchanged, got %v", sess.ExpiresAt)
+		}
+	})
+
+	t.Run("renewal strictly clamps to CreatedAt + AbsoluteTimeout", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+
+		cfg := kagi.DefaultSessionConfig()
+		svc := kagi.NewSessionService(mockStore, mockSec, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		// Created 28 days ago. AbsoluteTimeout = 30 days. Hard max = CreatedAt + 30 days = fixedTime + 2 days.
+		// Session has 1 day remaining (<= 3.5 days threshold).
+		// IdleTimeout would suggest now + 7 days, but absolute ceiling is now + 2 days!
+		createdAt := fixedTime.Add(-28 * 24 * time.Hour)
+		absMax := createdAt.Add(cfg.AbsoluteTimeout) // fixedTime + 2 days
+		existingSession := &kagi.Session{
+			ID:        "sess-clamped",
+			UserID:    "user-clamped",
+			TokenHash: tokenHash,
+			ExpiresAt: fixedTime.Add(1 * 24 * time.Hour),
+			CreatedAt: createdAt,
+			UpdatedAt: fixedTime.Add(-6 * 24 * time.Hour),
+		}
+
+		mockSec.EXPECT().GetSession(gomock.Any(), tokenHash).Return(nil, nil).Times(1)
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(existingSession, nil).Times(1)
+
+		mockStore.EXPECT().Update(gomock.Any(), gomock.AssignableToTypeOf(&kagi.Session{})).DoAndReturn(
+			func(_ context.Context, s *kagi.Session) error {
+				if !s.ExpiresAt.Equal(absMax) {
+					t.Errorf("expected clamped ExpiresAt %v, got %v", absMax, s.ExpiresAt)
+				}
+				return nil
+			},
+		).Times(1)
+
+		expectedTTL := absMax.Sub(fixedTime)
+		mockSec.EXPECT().SetSession(gomock.Any(), gomock.AssignableToTypeOf(&kagi.Session{}), expectedTTL).Return(nil).Times(1)
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if !renewed {
+			t.Fatalf("expected renewed == true")
+		}
+		if !sess.ExpiresAt.Equal(absMax) {
+			t.Fatalf("expected sess.ExpiresAt == absMax (%v), got %v", absMax, sess.ExpiresAt)
+		}
+	})
+
+	t.Run("prevents redundant writes when session has reached absolute ceiling", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+
+		cfg := kagi.DefaultSessionConfig()
+		svc := kagi.NewSessionService(mockStore, mockSec, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		// Session was created 29 days ago.
+		// ExpiresAt is ALREADY at the absolute ceiling (CreatedAt + 30 days = fixedTime + 1 day).
+		// Remaining is 1 day (<= 3.5 days threshold).
+		// But newExpiresAt = min(now + 7d, absMax) = absMax = existingSession.ExpiresAt.
+		// Since newExpiresAt is NOT strictly after ExpiresAt, NO UPDATE should occur!
+		createdAt := fixedTime.Add(-29 * 24 * time.Hour)
+		absMax := createdAt.Add(cfg.AbsoluteTimeout)
+		existingSession := &kagi.Session{
+			ID:        "sess-capped",
+			UserID:    "user-capped",
+			TokenHash: tokenHash,
+			ExpiresAt: absMax, // already capped
+			CreatedAt: createdAt,
+			UpdatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+		}
+
+		mockSec.EXPECT().GetSession(gomock.Any(), tokenHash).Return(nil, nil).Times(1)
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(existingSession, nil).Times(1)
+		// Store.Update MUST NOT be called!
+		// Opportunistic cache backfill
+		mockSec.EXPECT().SetSession(gomock.Any(), existingSession, absMax.Sub(fixedTime)).Return(nil).Times(1)
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if renewed {
+			t.Fatalf("expected renewed == false when already at absolute ceiling")
+		}
+		if !sess.ExpiresAt.Equal(absMax) {
+			t.Fatalf("expected ExpiresAt unchanged, got %v", sess.ExpiresAt)
+		}
+	})
+
+	t.Run("secondary cache hit avoids querying primary store", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+
+		cfg := kagi.DefaultSessionConfig()
+		svc := kagi.NewSessionService(mockStore, mockSec, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		cachedSession := &kagi.Session{
+			ID:        "sess-cached",
+			UserID:    "user-cached",
+			TokenHash: tokenHash,
+			ExpiresAt: fixedTime.Add(6 * 24 * time.Hour), // remaining > 3.5 days -> no renewal
+			CreatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+			UpdatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+		}
+
+		// Returns cached session
+		mockSec.EXPECT().GetSession(gomock.Any(), tokenHash).Return(cachedSession, nil).Times(1)
+		// mockStore must NOT be called at all!
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if renewed {
+			t.Fatalf("expected renewed == false")
+		}
+		if sess.ID != "sess-cached" {
+			t.Fatalf("expected cached session, got %v", sess)
+		}
+	})
+
+	t.Run("secondary storage error gracefully falls back to primary store", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+
+		cfg := kagi.DefaultSessionConfig()
+		svc := kagi.NewSessionService(mockStore, mockSec, cfg, fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		storedSession := &kagi.Session{
+			ID:        "sess-fallback",
+			UserID:    "user-fallback",
+			TokenHash: tokenHash,
+			ExpiresAt: fixedTime.Add(6 * 24 * time.Hour),
+			CreatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+			UpdatedAt: fixedTime.Add(-1 * 24 * time.Hour),
+		}
+
+		// Secondary returns error
+		mockSec.EXPECT().GetSession(gomock.Any(), tokenHash).Return(nil, errors.New("redis timeout")).Times(1)
+		// Fallback to store succeeds
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(storedSession, nil).Times(1)
+		// Backfill attempt
+		mockSec.EXPECT().SetSession(gomock.Any(), storedSession, gomock.Any()).Return(nil).Times(1)
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if renewed {
+			t.Fatalf("expected renewed == false")
+		}
+		if sess.ID != "sess-fallback" {
+			t.Fatalf("expected fallback session, got %v", sess)
+		}
+	})
+
+	t.Run("primary store error propagates", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		dbErr := errors.New("db connection failure")
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(nil, dbErr).Times(1)
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if !errors.Is(err, dbErr) {
+			t.Fatalf("expected dbErr, got %v", err)
+		}
+		if sess != nil || renewed {
+			t.Fatalf("expected nil session and false renewed")
+		}
+	})
+
+	t.Run("primary store Update error on renewal propagates", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		existingSession := &kagi.Session{
+			ID:        "sess-renew-err",
+			UserID:    "user-renew-err",
+			TokenHash: tokenHash,
+			ExpiresAt: fixedTime.Add(2 * 24 * time.Hour), // <= 3.5 days -> renew
+			CreatedAt: fixedTime.Add(-5 * 24 * time.Hour),
+			UpdatedAt: fixedTime.Add(-5 * 24 * time.Hour),
+		}
+
+		updateErr := errors.New("store update failed")
+		mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(existingSession, nil).Times(1)
+		mockStore.EXPECT().Update(gomock.Any(), gomock.Any()).Return(updateErr).Times(1)
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if !errors.Is(err, updateErr) {
+			t.Fatalf("expected updateErr, got %v", err)
+		}
+		if sess != nil || renewed {
+			t.Fatalf("expected nil session and false renewed")
+		}
+	})
+
+	t.Run("secondary storage SetSession error on renewal propagates", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		svc := kagi.NewSessionService(mockStore, mockSec, kagi.DefaultSessionConfig(), fakeClk)
+
+		rawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		tokenHash := crypto.HashToken(rawToken)
+
+		existingSession := &kagi.Session{
+			ID:        "sess-sec-renew-err",
+			UserID:    "user-sec-renew-err",
+			TokenHash: tokenHash,
+			ExpiresAt: fixedTime.Add(2 * 24 * time.Hour), // <= 3.5 days -> renew
+			CreatedAt: fixedTime.Add(-5 * 24 * time.Hour),
+			UpdatedAt: fixedTime.Add(-5 * 24 * time.Hour),
+		}
+
+		secErr := errors.New("redis write failed")
+		mockSec.EXPECT().GetSession(gomock.Any(), tokenHash).Return(existingSession, nil).Times(1)
+		mockStore.EXPECT().Update(gomock.Any(), gomock.Any()).Return(nil).Times(1)
+		mockSec.EXPECT().SetSession(gomock.Any(), gomock.Any(), gomock.Any()).Return(secErr).Times(1)
+
+		sess, renewed, err := svc.Validate(context.Background(), rawToken)
+		if !errors.Is(err, secErr) {
+			t.Fatalf("expected secErr, got %v", err)
+		}
+		if sess != nil || renewed {
+			t.Fatalf("expected nil session and false renewed")
+		}
+	})
+}

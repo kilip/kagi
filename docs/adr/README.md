@@ -24,6 +24,7 @@ Product scope lives in the [PRD](../prd.md); delivery is tracked in the
 | [0013](0013-openapi-v3-contract.md) | OpenAPI 3.1 contract via Go comments and sentinel error mapping | Accepted |
 | [0014](0014-session-policy.md) | Session policy: lifetimes, sliding renewal, token rotation and revocation | Accepted |
 | [0015](0015-csrf-and-oauth-state.md) | CSRF protection and OAuth state/PKCE storage | Accepted |
+| [0016](0016-ent-extra-field-mapping.md) | Ent extra-field mapping and store builder extensibility | Proposed |
 
 ## When to write an ADR
 

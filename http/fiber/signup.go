@@ -22,6 +22,7 @@ type SignUpRequest struct {
 //	@Param			request	body		SignUpRequest	true	"Sign up credentials"
 //	@Success		201		{object}	kagi.User		"User successfully registered"
 //	@Failure		400		{object}	ErrorResponse	"Invalid request payload or weak password"
+//	@Failure		403		{object}	ErrorResponse	"CSRF token missing or invalid"
 //	@Failure		409		{object}	ErrorResponse	"Email already registered"
 //	@Failure		500		{object}	ErrorResponse	"Internal server error"
 //	@Router			/sign-up [post]
@@ -44,6 +45,8 @@ func (h *Handler) SignUp(c *fiber.Ctx) error {
 		status, code := mapError(err)
 		return writeError(c, status, code)
 	}
+
+	h.rotateCSRFCookie(c)
 
 	return c.Status(fiber.StatusCreated).JSON(user)
 }

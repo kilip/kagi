@@ -14,6 +14,7 @@ type SignOutResponse struct {
 //	@Tags			Authentication
 //	@Produce		json
 //	@Success		200	{object}	SignOutResponse	"Successfully signed out"
+//	@Failure		403	{object}	ErrorResponse	"CSRF token missing or invalid"
 //	@Failure		500	{object}	ErrorResponse	"Internal server error"
 //	@Header			200	{string}	Set-Cookie		"kagi_session=; Path=/; Max-Age=-1; HttpOnly; Secure; SameSite=Lax"
 //	@Router			/sign-out [post]
@@ -28,7 +29,7 @@ func (h *Handler) SignOut(c *fiber.Ctx) error {
 	}
 
 	clearSessionCookie(c, h.cfg.Cookie)
-
+	h.rotateCSRFCookie(c)
 	return c.Status(fiber.StatusOK).JSON(SignOutResponse{
 		Message: "signed out",
 	})

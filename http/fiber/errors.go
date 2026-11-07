@@ -5,6 +5,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/kilip/kagi"
+	"github.com/kilip/kagi/internal/crypto"
 )
 
 // ErrorResponse represents a uniform JSON error payload.
@@ -36,11 +37,11 @@ func mapError(err error) (int, string) {
 		return fiber.StatusUnauthorized, "invalid_session"
 	case errors.Is(err, kagi.ErrSessionNotFound), errors.Is(err, kagi.ErrSessionExpired):
 		return fiber.StatusUnauthorized, "session_not_found"
-	case errors.Is(err, kagi.ErrCSRFTokenMissing):
+	case errors.Is(err, kagi.ErrCSRFTokenMissing), errors.Is(err, crypto.ErrCSRFTokenMissing):
 		return fiber.StatusForbidden, "csrf_token_missing"
-	case errors.Is(err, kagi.ErrCSRFTokenInvalid):
+	case errors.Is(err, kagi.ErrCSRFTokenInvalid), errors.Is(err, crypto.ErrCSRFTokenInvalid):
 		return fiber.StatusForbidden, "csrf_token_invalid"
-	case errors.Is(err, kagi.ErrCSRFTokenMismatch):
+	case errors.Is(err, kagi.ErrCSRFTokenMismatch), errors.Is(err, crypto.ErrCSRFTokenMismatch):
 		return fiber.StatusForbidden, "csrf_token_mismatch"
 	default:
 		return fiber.StatusInternalServerError, "internal_error"

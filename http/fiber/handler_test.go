@@ -115,6 +115,7 @@ func fastPasswordConfig() kagi.PasswordConfig {
 
 func setupTestAppWithClock(t *testing.T, kagiConfigFn func(*kagi.Config), opts ...pkgfiber.Option) (*fiber.App, *kagi.Kagi, *memory.Stores, *clock.FakeClock) {
 	t.Helper()
+	opts = append([]pkgfiber.Option{pkgfiber.WithCSRFDisabled(true)}, opts...)
 	fakeClk := clock.NewFake(time.Now().UTC())
 	stores := memory.New(memory.WithClock(fakeClk))
 	cfg := kagi.Config{

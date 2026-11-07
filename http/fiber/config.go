@@ -1,6 +1,11 @@
 package fiber
 
-import "github.com/gofiber/fiber/v2"
+import (
+	"strings"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+)
 
 // CookieConfig configures session cookies issued by Kagi Fiber handlers.
 type CookieConfig struct {
@@ -45,10 +50,54 @@ func (c CookieConfig) IsSecure() bool {
 	return c.Secure
 }
 
+// CSRFConfig configures Cross-Site Request Forgery (CSRF) protection for Kagi Fiber handlers (ADR-0015).
+type CSRFConfig struct {
+	SecretKey     []byte        // Master key used with HKDF to derive CSRF signing key
+	CookieName    string        // Default: "__Host-kagi_csrf" ("kagi_csrf" if !Secure)
+	HeaderName    string        // Default: "X-CSRF-Token"
+	FormFieldName string        // Default: "_csrf"
+	CookieMaxAge  time.Duration // Default: 24 * time.Hour
+	Secure        bool          // Default: true (false only in non-TLS dev)
+	Disabled      bool          // Allows disabling CSRF (useful for tests or non-browser clients)
+}
+
+// DefaultCSRFConfig returns secure production-ready CSRF defaults (ADR-0015).
+func DefaultCSRFConfig() CSRFConfig {
+	return CSRFConfig{
+		SecretKey:     nil,
+		CookieName:    "__Host-kagi_csrf",
+		HeaderName:    "X-CSRF-Token",
+		FormFieldName: "_csrf",
+		CookieMaxAge:  24 * time.Hour,
+		Secure:        true,
+		Disabled:      false,
+	}
+}
+
+// EffectiveCookieName returns the effective CSRF cookie name.
+// When Secure is false (e.g. InsecureDevMode), the "__Host-" prefix is omitted
+// because browsers reject "__Host-" prefixed cookies sent over non-HTTPS connections.
+func (c CSRFConfig) EffectiveCookieName() string {
+	name := c.CookieName
+	if name == "" {
+		name = "__Host-kagi_csrf"
+	}
+	if !c.IsSecure() && strings.HasPrefix(name, "__Host-") {
+		return strings.TrimPrefix(name, "__Host-")
+	}
+	return name
+}
+
+// IsSecure returns whether the CSRF cookie should have the Secure attribute set.
+func (c CSRFConfig) IsSecure() bool {
+	return c.Secure
+}
+
 // Config configures the Fiber HTTP mounting and handlers for Kagi.
 type Config struct {
 	Prefix string
 	Cookie CookieConfig
+	CSRF   CSRFConfig
 }
 
 // DefaultConfig returns default Fiber handler configuration.
@@ -56,6 +105,7 @@ func DefaultConfig() Config {
 	return Config{
 		Prefix: "",
 		Cookie: DefaultCookieConfig(),
+		CSRF:   DefaultCSRFConfig(),
 	}
 }
 
@@ -84,5 +134,20 @@ func WithInsecureDevMode(enabled bool) Option {
 		if enabled {
 			c.Cookie.Secure = false
 		}
+		c.CSRF.Secure = !enabled
+	}
+}
+
+// WithCSRFConfig sets custom CSRF configuration.
+func WithCSRFConfig(cfg CSRFConfig) Option {
+	return func(c *Config) {
+		c.CSRF = cfg
+	}
+}
+
+// WithCSRFDisabled enables or disables CSRF protection.
+func WithCSRFDisabled(disabled bool) Option {
+	return func(c *Config) {
+		c.CSRF.Disabled = disabled
 	}
 }

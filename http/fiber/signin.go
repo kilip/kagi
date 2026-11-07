@@ -28,6 +28,7 @@ type AuthResponse struct {
 //	@Success		200		{object}	AuthResponse	"Successfully authenticated"
 //	@Failure		400		{object}	ErrorResponse	"Invalid request payload"
 //	@Failure		401		{object}	ErrorResponse	"Invalid credentials"
+//	@Failure		403		{object}	ErrorResponse	"CSRF token missing or invalid"
 //	@Failure		429		{object}	ErrorResponse	"Rate limit exceeded"
 //	@Failure		500		{object}	ErrorResponse	"Internal server error"
 //	@Header			200		{string}	Set-Cookie		"kagi_session=...; Path=/; HttpOnly; Secure; SameSite=Lax"
@@ -56,6 +57,8 @@ func (h *Handler) SignIn(c *fiber.Ctx) error {
 	if result.Session != nil && !result.Session.Pending2FA {
 		setSessionCookie(c, h.cfg.Cookie, result.RawToken, result.Session.ExpiresAt)
 	}
+
+	h.rotateCSRFCookie(c)
 
 	return c.Status(fiber.StatusOK).JSON(AuthResponse{
 		User:    result.User,

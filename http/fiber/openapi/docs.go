@@ -19,6 +19,14 @@ const docTemplate = `{
                 },
                 "type": "object"
             },
+            "fiber.CSRFResponse": {
+                "properties": {
+                    "csrf_token": {
+                        "type": "string"
+                    }
+                },
+                "type": "object"
+            },
             "fiber.ErrorResponse": {
                 "properties": {
                     "error": {
@@ -154,6 +162,45 @@ const docTemplate = `{
         "url": ""
     },
     "paths": {
+        "/csrf": {
+            "get": {
+                "description": "Returns a masked CSRF token and sets the CSRF cookie if not present or invalid.",
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/fiber.CSRFResponse"
+                                }
+                            }
+                        },
+                        "description": "Masked CSRF token",
+                        "headers": {
+                            "Set-Cookie": {
+                                "description": "__Host-kagi_csrf=...; Path=/; HttpOnly; Secure; SameSite=Lax",
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/fiber.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Internal server error"
+                    }
+                },
+                "summary": "Get CSRF token",
+                "tags": [
+                    "Authentication"
+                ]
+            }
+        },
         "/sign-in": {
             "post": {
                 "description": "Authenticates user credentials and establishes a session delivered via HttpOnly cookie.",
@@ -209,6 +256,16 @@ const docTemplate = `{
                         },
                         "description": "Invalid credentials"
                     },
+                    "403": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/fiber.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "CSRF token missing or invalid"
+                    },
                     "429": {
                         "content": {
                             "application/json": {
@@ -257,6 +314,16 @@ const docTemplate = `{
                                 }
                             }
                         }
+                    },
+                    "403": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/fiber.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "CSRF token missing or invalid"
                     },
                     "500": {
                         "content": {
@@ -311,6 +378,16 @@ const docTemplate = `{
                             }
                         },
                         "description": "Invalid request payload or weak password"
+                    },
+                    "403": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/fiber.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "CSRF token missing or invalid"
                     },
                     "409": {
                         "content": {

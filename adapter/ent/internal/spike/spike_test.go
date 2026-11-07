@@ -22,7 +22,12 @@ import (
 	"github.com/kilip/kagi/adaptertest"
 )
 
-func setupTestClient(t *testing.T) *ent.Client {
+type dbDriver struct {
+	name  string
+	setup func(t *testing.T) *ent.Client
+}
+
+func setupSQLiteTestClient(t *testing.T) *ent.Client {
 	t.Helper()
 
 	client, err := ent.Open("sqlite3", "file:spiketest?mode=memory&cache=shared&_fk=1")
@@ -41,6 +46,60 @@ func setupTestClient(t *testing.T) *ent.Client {
 	})
 
 	return client
+}
+
+func setupPostgresTestClient(t *testing.T) *ent.Client {
+	t.Helper()
+
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("skipping Postgres test: TEST_POSTGRES_DSN not set")
+	}
+
+	client, err := ent.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("failed opening connection to postgres: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := client.Schema.Create(ctx); err != nil {
+		client.Close()
+		t.Fatalf("failed creating schema resources: %v", err)
+	}
+
+	cleanDB := func() {
+		_, _ = client.Account.Delete().Exec(ctx)
+		_, _ = client.Session.Delete().Exec(ctx)
+		_, _ = client.Verification.Delete().Exec(ctx)
+		_, _ = client.RateLimit.Delete().Exec(ctx)
+		_, _ = client.User.Delete().Exec(ctx)
+	}
+
+	cleanDB()
+
+	t.Cleanup(func() {
+		cleanDB()
+		client.Close()
+	})
+
+	return client
+}
+
+func setupTestClient(t *testing.T) *ent.Client {
+	return setupSQLiteTestClient(t)
+}
+
+func testDrivers() []dbDriver {
+	return []dbDriver{
+		{
+			name:  "SQLite",
+			setup: setupSQLiteTestClient,
+		},
+		{
+			name:  "PostgreSQL",
+			setup: setupPostgresTestClient,
+		},
+	}
 }
 
 func TestEntcGeneration(t *testing.T) {
@@ -67,51 +126,75 @@ func TestEntcGeneration(t *testing.T) {
 	}
 }
 func TestKagiAdapter_FullConformance(t *testing.T) {
-	client := setupTestClient(t)
-	adapter := ent.NewKagiAdapter(client)
-	adaptertest.RunAll(t, adapter.AsAdaptertestStores())
+	for _, db := range testDrivers() {
+		t.Run(db.name, func(t *testing.T) {
+			client := db.setup(t)
+			adapter := ent.NewKagiAdapter(client)
+			adaptertest.RunAll(t, adapter.AsAdaptertestStores())
+		})
+	}
 }
 
 func TestKagiAccountStore_Conformance(t *testing.T) {
 	var _ kagi.AccountStore = (*ent.KagiAccountStore)(nil)
 
-	client := setupTestClient(t)
-	accountStore := ent.NewKagiAccountStore(client)
-	userStore := ent.NewKagiUserStore(client)
-	adaptertest.RunAccountStoreTests(t, accountStore, userStore)
+	for _, db := range testDrivers() {
+		t.Run(db.name, func(t *testing.T) {
+			client := db.setup(t)
+			accountStore := ent.NewKagiAccountStore(client)
+			userStore := ent.NewKagiUserStore(client)
+			adaptertest.RunAccountStoreTests(t, accountStore, userStore)
+		})
+	}
 }
 
 func TestKagiSessionStore_Conformance(t *testing.T) {
 	var _ kagi.SessionStore = (*ent.KagiSessionStore)(nil)
 
-	client := setupTestClient(t)
-	sessionStore := ent.NewKagiSessionStore(client)
-	userStore := ent.NewKagiUserStore(client)
-	adaptertest.RunSessionStoreTests(t, sessionStore, userStore)
+	for _, db := range testDrivers() {
+		t.Run(db.name, func(t *testing.T) {
+			client := db.setup(t)
+			sessionStore := ent.NewKagiSessionStore(client)
+			userStore := ent.NewKagiUserStore(client)
+			adaptertest.RunSessionStoreTests(t, sessionStore, userStore)
+		})
+	}
 }
 
 func TestKagiVerificationStore_Conformance(t *testing.T) {
 	var _ kagi.VerificationStore = (*ent.KagiVerificationStore)(nil)
 
-	client := setupTestClient(t)
-	verificationStore := ent.NewKagiVerificationStore(client)
-	adaptertest.RunVerificationStoreTests(t, verificationStore)
+	for _, db := range testDrivers() {
+		t.Run(db.name, func(t *testing.T) {
+			client := db.setup(t)
+			verificationStore := ent.NewKagiVerificationStore(client)
+			adaptertest.RunVerificationStoreTests(t, verificationStore)
+		})
+	}
 }
 
 func TestKagiRateLimitStore_Conformance(t *testing.T) {
 	var _ kagi.RateLimitStore = (*ent.KagiRateLimitStore)(nil)
 
-	client := setupTestClient(t)
-	rateLimitStore := ent.NewKagiRateLimitStore(client)
-	adaptertest.RunRateLimitStoreTests(t, rateLimitStore)
+	for _, db := range testDrivers() {
+		t.Run(db.name, func(t *testing.T) {
+			client := db.setup(t)
+			rateLimitStore := ent.NewKagiRateLimitStore(client)
+			adaptertest.RunRateLimitStoreTests(t, rateLimitStore)
+		})
+	}
 }
 
 func TestKagiUserStore_Conformance(t *testing.T) {
 	var _ kagi.UserStore = (*ent.KagiUserStore)(nil)
 
-	client := setupTestClient(t)
-	store := ent.NewKagiUserStore(client)
-	adaptertest.RunUserStoreTests(t, store)
+	for _, db := range testDrivers() {
+		t.Run(db.name, func(t *testing.T) {
+			client := db.setup(t)
+			store := ent.NewKagiUserStore(client)
+			adaptertest.RunUserStoreTests(t, store)
+		})
+	}
 }
 
 func TestKagiUserStore_Lifecycle(t *testing.T) {

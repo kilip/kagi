@@ -1,0 +1,248 @@
+{{/* gotype: entgo.io/ent/entc/gen.Graph */}}
+
+{{ define "kagi_verification_store" }}
+
+{{ $pkg := base $.Config.Package }}
+{{ template "header" $ }}
+
+{{/* Find the node that represents the Kagi Verification */}}
+{{ $verificationNode := "" }}
+{{ range $n := $.Nodes }}
+	{{ if or (hasKey $n.Annotations "KagiVerification") (eq $n.Name "Verification") }}
+		{{ $verificationNode = $n }}
+	{{ end }}
+{{ end }}
+
+{{ if $verificationNode }}
+import (
+	"context"
+	"time"
+	{{- if or $verificationNode.ID.IsInt $verificationNode.ID.IsInt64 }}
+	"strconv"
+	{{- end }}
+	{{- if $verificationNode.ID.IsUUID }}
+	"github.com/google/uuid"
+	{{- end }}
+
+	"github.com/kilip/kagi"
+	{{ $verificationNode.Package }} "{{ $verificationNode.Config.Package }}/{{ $verificationNode.PackageDir }}"
+)
+
+// KagiVerificationStore implements kagi.VerificationStore using the ent client.
+type KagiVerificationStore struct {
+	client *Client
+}
+
+// NewKagiVerificationStore creates a new kagi.VerificationStore backed by ent.
+func NewKagiVerificationStore(client *Client) *KagiVerificationStore {
+	return &KagiVerificationStore{client: client}
+}
+
+var _ kagi.VerificationStore = (*KagiVerificationStore)(nil)
+
+// Create persists a new Verification record in storage.
+func (s *KagiVerificationStore) Create(ctx context.Context, v *kagi.Verification) error {
+	if v == nil {
+		return kagi.ErrVerificationNotFound
+	}
+
+	builder := s.client.{{ $verificationNode.Name }}.Create().
+		SetTarget(v.Target).
+		SetType(string(v.Type)).
+		SetCodeHash(v.CodeHash).
+		SetExpiresAt(v.ExpiresAt).
+		SetAttempts(v.Attempts)
+
+	if !v.CreatedAt.IsZero() {
+		builder.SetCreatedAt(v.CreatedAt)
+	}
+	if !v.UpdatedAt.IsZero() {
+		builder.SetUpdatedAt(v.UpdatedAt)
+	}
+
+	created, err := builder.Save(ctx)
+	if err != nil {
+		return err
+	}
+
+	v.CreatedAt = created.CreatedAt
+	v.UpdatedAt = created.UpdatedAt
+
+	{{ if $verificationNode.ID.IsInt -}}
+	v.ID = strconv.Itoa(created.ID)
+	{{- else if $verificationNode.ID.IsInt64 -}}
+	v.ID = strconv.FormatInt(created.ID, 10)
+	{{- else if $verificationNode.ID.IsString -}}
+	v.ID = created.ID
+	{{- else if $verificationNode.ID.IsUUID -}}
+	v.ID = created.ID.String()
+	{{- else -}}
+	v.ID = strconv.Itoa(created.ID)
+	{{- end }}
+	return nil
+}
+
+// Get retrieves the active, unexpired Verification record for target and type (ADR-0010).
+func (s *KagiVerificationStore) Get(ctx context.Context, target string, vType kagi.VerificationType) (*kagi.Verification, error) {
+	now := time.Now().UTC()
+	entity, err := s.client.{{ $verificationNode.Name }}.Query().
+		Where(
+			{{ $verificationNode.Package }}.TargetEQ(target),
+			{{ $verificationNode.Package }}.TypeEQ(string(vType)),
+			{{ $verificationNode.Package }}.ExpiresAtGT(now),
+		).
+		Order(Desc({{ $verificationNode.Package }}.FieldCreatedAt)).
+		First(ctx)
+	if err != nil {
+		if IsNotFound(err) {
+			return nil, kagi.ErrVerificationNotFound
+		}
+		return nil, err
+	}
+
+	return s.toKagiVerification(entity), nil
+}
+
+// Update updates mutable fields of an active, unexpired verification record (ADR-0010).
+func (s *KagiVerificationStore) Update(ctx context.Context, v *kagi.Verification) error {
+	if v == nil {
+		return kagi.ErrVerificationNotFound
+	}
+
+	{{ if $verificationNode.ID.IsInt -}}
+	parsedID, err := strconv.Atoi(v.ID)
+	if err != nil {
+		return kagi.ErrVerificationNotFound
+	}
+	{{- else if $verificationNode.ID.IsInt64 -}}
+	parsedID, err := strconv.ParseInt(v.ID, 10, 64)
+	if err != nil {
+		return kagi.ErrVerificationNotFound
+	}
+	{{- else if $verificationNode.ID.IsUUID -}}
+	parsedID, err := uuid.Parse(v.ID)
+	if err != nil {
+		return kagi.ErrVerificationNotFound
+	}
+	{{- else -}}
+	parsedID := v.ID
+	{{- end }}
+
+	now := time.Now().UTC()
+	builder := s.client.{{ $verificationNode.Name }}.Update().
+		Where(
+			{{ $verificationNode.Package }}.IDEQ(parsedID),
+			{{ $verificationNode.Package }}.ExpiresAtGT(now),
+		).
+		SetTarget(v.Target).
+		SetType(string(v.Type)).
+		SetCodeHash(v.CodeHash).
+		SetExpiresAt(v.ExpiresAt).
+		SetAttempts(v.Attempts)
+
+	if !v.UpdatedAt.IsZero() {
+		builder.SetUpdatedAt(v.UpdatedAt)
+	}
+
+	affected, err := builder.Save(ctx)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return kagi.ErrVerificationNotFound
+	}
+
+	return nil
+}
+
+// Delete permanently removes a Verification record by its string ID.
+func (s *KagiVerificationStore) Delete(ctx context.Context, id string) error {
+	{{ if $verificationNode.ID.IsInt -}}
+	parsedID, err := strconv.Atoi(id)
+	if err != nil {
+		return kagi.ErrVerificationNotFound
+	}
+	{{- else if $verificationNode.ID.IsInt64 -}}
+	parsedID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return kagi.ErrVerificationNotFound
+	}
+	{{- else if $verificationNode.ID.IsUUID -}}
+	parsedID, err := uuid.Parse(id)
+	if err != nil {
+		return kagi.ErrVerificationNotFound
+	}
+	{{- else -}}
+	parsedID := id
+	{{- end }}
+
+	affected, err := s.client.{{ $verificationNode.Name }}.Delete().
+		Where({{ $verificationNode.Package }}.IDEQ(parsedID)).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return kagi.ErrVerificationNotFound
+	}
+
+	return nil
+}
+
+// DeleteExpired removes expired verification records in bounded batches up to batchSize.
+func (s *KagiVerificationStore) DeleteExpired(ctx context.Context, batchSize int) (int, error) {
+	if batchSize <= 0 {
+		return 0, nil
+	}
+
+	now := time.Now().UTC()
+	expiredEntities, err := s.client.{{ $verificationNode.Name }}.Query().
+		Where({{ $verificationNode.Package }}.ExpiresAtLTE(now)).
+		Limit(batchSize).
+		All(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if len(expiredEntities) == 0 {
+		return 0, nil
+	}
+
+	ids := make([]{{ if $verificationNode.ID.IsInt }}int{{ else if $verificationNode.ID.IsInt64 }}int64{{ else if $verificationNode.ID.IsUUID }}uuid.UUID{{ else }}string{{ end }}, len(expiredEntities))
+	for i, entity := range expiredEntities {
+		ids[i] = entity.ID
+	}
+
+	affected, err := s.client.{{ $verificationNode.Name }}.Delete().
+		Where({{ $verificationNode.Package }}.IDIn(ids...)).
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	return affected, nil
+}
+
+func (s *KagiVerificationStore) toKagiVerification(entity *{{ $verificationNode.Name }}) *kagi.Verification {
+	return &kagi.Verification{
+		{{ if $verificationNode.ID.IsInt -}}
+		ID: strconv.Itoa(entity.ID),
+		{{- else if $verificationNode.ID.IsInt64 -}}
+		ID: strconv.FormatInt(entity.ID, 10),
+		{{- else if $verificationNode.ID.IsString -}}
+		ID: entity.ID,
+		{{- else if $verificationNode.ID.IsUUID -}}
+		ID: entity.ID.String(),
+		{{- else -}}
+		ID: strconv.Itoa(entity.ID),
+		{{- end }}
+		Target:    entity.Target,
+		Type:      kagi.VerificationType(entity.Type),
+		CodeHash:  entity.CodeHash,
+		ExpiresAt: entity.ExpiresAt,
+		Attempts:  entity.Attempts,
+		CreatedAt: entity.CreatedAt,
+		UpdatedAt: entity.UpdatedAt,
+	}
+}
+{{ end }}
+{{ end }}

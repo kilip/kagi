@@ -14,10 +14,14 @@ type Tx struct {
 	config
 	// Account is the client for interacting with the Account builders.
 	Account *AccountClient
+	// RateLimit is the client for interacting with the RateLimit builders.
+	RateLimit *RateLimitClient
 	// Session is the client for interacting with the Session builders.
 	Session *SessionClient
 	// User is the client for interacting with the User builders.
 	User *UserClient
+	// Verification is the client for interacting with the Verification builders.
+	Verification *VerificationClient
 
 	// lazily loaded.
 	client     *Client
@@ -150,8 +154,10 @@ func (tx *Tx) Client() *Client {
 
 func (tx *Tx) init() {
 	tx.Account = NewAccountClient(tx.config)
+	tx.RateLimit = NewRateLimitClient(tx.config)
 	tx.Session = NewSessionClient(tx.config)
 	tx.User = NewUserClient(tx.config)
+	tx.Verification = NewVerificationClient(tx.config)
 }
 
 // txDriver wraps the given dialect.Tx with a nop dialect.Driver implementation.

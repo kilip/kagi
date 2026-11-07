@@ -15,8 +15,10 @@ import (
 	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/sql"
 	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/account"
+	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/ratelimit"
 	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/session"
 	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/user"
+	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/verification"
 )
 
 // Client is the client that holds all ent builders.
@@ -26,10 +28,14 @@ type Client struct {
 	Schema *migrate.Schema
 	// Account is the client for interacting with the Account builders.
 	Account *AccountClient
+	// RateLimit is the client for interacting with the RateLimit builders.
+	RateLimit *RateLimitClient
 	// Session is the client for interacting with the Session builders.
 	Session *SessionClient
 	// User is the client for interacting with the User builders.
 	User *UserClient
+	// Verification is the client for interacting with the Verification builders.
+	Verification *VerificationClient
 }
 
 // NewClient creates a new client configured with the given options.
@@ -42,8 +48,10 @@ func NewClient(opts ...Option) *Client {
 func (c *Client) init() {
 	c.Schema = migrate.NewSchema(c.driver)
 	c.Account = NewAccountClient(c.config)
+	c.RateLimit = NewRateLimitClient(c.config)
 	c.Session = NewSessionClient(c.config)
 	c.User = NewUserClient(c.config)
+	c.Verification = NewVerificationClient(c.config)
 }
 
 type (
@@ -134,11 +142,13 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 	cfg := c.config
 	cfg.driver = tx
 	return &Tx{
-		ctx:     ctx,
-		config:  cfg,
-		Account: NewAccountClient(cfg),
-		Session: NewSessionClient(cfg),
-		User:    NewUserClient(cfg),
+		ctx:          ctx,
+		config:       cfg,
+		Account:      NewAccountClient(cfg),
+		RateLimit:    NewRateLimitClient(cfg),
+		Session:      NewSessionClient(cfg),
+		User:         NewUserClient(cfg),
+		Verification: NewVerificationClient(cfg),
 	}, nil
 }
 
@@ -156,11 +166,13 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 	cfg := c.config
 	cfg.driver = &txDriver{tx: tx, drv: c.driver}
 	return &Tx{
-		ctx:     ctx,
-		config:  cfg,
-		Account: NewAccountClient(cfg),
-		Session: NewSessionClient(cfg),
-		User:    NewUserClient(cfg),
+		ctx:          ctx,
+		config:       cfg,
+		Account:      NewAccountClient(cfg),
+		RateLimit:    NewRateLimitClient(cfg),
+		Session:      NewSessionClient(cfg),
+		User:         NewUserClient(cfg),
+		Verification: NewVerificationClient(cfg),
 	}, nil
 }
 
@@ -190,16 +202,20 @@ func (c *Client) Close() error {
 // In order to add hooks to a specific client, call: `client.Node.Use(...)`.
 func (c *Client) Use(hooks ...Hook) {
 	c.Account.Use(hooks...)
+	c.RateLimit.Use(hooks...)
 	c.Session.Use(hooks...)
 	c.User.Use(hooks...)
+	c.Verification.Use(hooks...)
 }
 
 // Intercept adds the query interceptors to all the entity clients.
 // In order to add interceptors to a specific client, call: `client.Node.Intercept(...)`.
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	c.Account.Intercept(interceptors...)
+	c.RateLimit.Intercept(interceptors...)
 	c.Session.Intercept(interceptors...)
 	c.User.Intercept(interceptors...)
+	c.Verification.Intercept(interceptors...)
 }
 
 // Mutate implements the ent.Mutator interface.
@@ -207,10 +223,14 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 	switch m := m.(type) {
 	case *AccountMutation:
 		return c.Account.mutate(ctx, m)
+	case *RateLimitMutation:
+		return c.RateLimit.mutate(ctx, m)
 	case *SessionMutation:
 		return c.Session.mutate(ctx, m)
 	case *UserMutation:
 		return c.User.mutate(ctx, m)
+	case *VerificationMutation:
+		return c.Verification.mutate(ctx, m)
 	default:
 		return nil, fmt.Errorf("ent: unknown mutation type %T", m)
 	}
@@ -346,6 +366,139 @@ func (c *AccountClient) mutate(ctx context.Context, m *AccountMutation) (Value, 
 		return (&AccountDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown Account mutation op: %q", m.Op())
+	}
+}
+
+// RateLimitClient is a client for the RateLimit schema.
+type RateLimitClient struct {
+	config
+}
+
+// NewRateLimitClient returns a client for the RateLimit from the given config.
+func NewRateLimitClient(c config) *RateLimitClient {
+	return &RateLimitClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `ratelimit.Hooks(f(g(h())))`.
+func (c *RateLimitClient) Use(hooks ...Hook) {
+	c.hooks.RateLimit = append(c.hooks.RateLimit, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `ratelimit.Intercept(f(g(h())))`.
+func (c *RateLimitClient) Intercept(interceptors ...Interceptor) {
+	c.inters.RateLimit = append(c.inters.RateLimit, interceptors...)
+}
+
+// Create returns a builder for creating a RateLimit entity.
+func (c *RateLimitClient) Create() *RateLimitCreate {
+	mutation := newRateLimitMutation(c.config, OpCreate)
+	return &RateLimitCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of RateLimit entities.
+func (c *RateLimitClient) CreateBulk(builders ...*RateLimitCreate) *RateLimitCreateBulk {
+	return &RateLimitCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *RateLimitClient) MapCreateBulk(slice any, setFunc func(*RateLimitCreate, int)) *RateLimitCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &RateLimitCreateBulk{err: fmt.Errorf("calling to RateLimitClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*RateLimitCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &RateLimitCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for RateLimit.
+func (c *RateLimitClient) Update() *RateLimitUpdate {
+	mutation := newRateLimitMutation(c.config, OpUpdate)
+	return &RateLimitUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *RateLimitClient) UpdateOne(rl *RateLimit) *RateLimitUpdateOne {
+	mutation := newRateLimitMutation(c.config, OpUpdateOne, withRateLimit(rl))
+	return &RateLimitUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *RateLimitClient) UpdateOneID(id int) *RateLimitUpdateOne {
+	mutation := newRateLimitMutation(c.config, OpUpdateOne, withRateLimitID(id))
+	return &RateLimitUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for RateLimit.
+func (c *RateLimitClient) Delete() *RateLimitDelete {
+	mutation := newRateLimitMutation(c.config, OpDelete)
+	return &RateLimitDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *RateLimitClient) DeleteOne(rl *RateLimit) *RateLimitDeleteOne {
+	return c.DeleteOneID(rl.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *RateLimitClient) DeleteOneID(id int) *RateLimitDeleteOne {
+	builder := c.Delete().Where(ratelimit.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &RateLimitDeleteOne{builder}
+}
+
+// Query returns a query builder for RateLimit.
+func (c *RateLimitClient) Query() *RateLimitQuery {
+	return &RateLimitQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeRateLimit},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a RateLimit entity by its id.
+func (c *RateLimitClient) Get(ctx context.Context, id int) (*RateLimit, error) {
+	return c.Query().Where(ratelimit.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *RateLimitClient) GetX(ctx context.Context, id int) *RateLimit {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *RateLimitClient) Hooks() []Hook {
+	return c.hooks.RateLimit
+}
+
+// Interceptors returns the client interceptors.
+func (c *RateLimitClient) Interceptors() []Interceptor {
+	return c.inters.RateLimit
+}
+
+func (c *RateLimitClient) mutate(ctx context.Context, m *RateLimitMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&RateLimitCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&RateLimitUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&RateLimitUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&RateLimitDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown RateLimit mutation op: %q", m.Op())
 	}
 }
 
@@ -615,12 +768,145 @@ func (c *UserClient) mutate(ctx context.Context, m *UserMutation) (Value, error)
 	}
 }
 
+// VerificationClient is a client for the Verification schema.
+type VerificationClient struct {
+	config
+}
+
+// NewVerificationClient returns a client for the Verification from the given config.
+func NewVerificationClient(c config) *VerificationClient {
+	return &VerificationClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `verification.Hooks(f(g(h())))`.
+func (c *VerificationClient) Use(hooks ...Hook) {
+	c.hooks.Verification = append(c.hooks.Verification, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `verification.Intercept(f(g(h())))`.
+func (c *VerificationClient) Intercept(interceptors ...Interceptor) {
+	c.inters.Verification = append(c.inters.Verification, interceptors...)
+}
+
+// Create returns a builder for creating a Verification entity.
+func (c *VerificationClient) Create() *VerificationCreate {
+	mutation := newVerificationMutation(c.config, OpCreate)
+	return &VerificationCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of Verification entities.
+func (c *VerificationClient) CreateBulk(builders ...*VerificationCreate) *VerificationCreateBulk {
+	return &VerificationCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *VerificationClient) MapCreateBulk(slice any, setFunc func(*VerificationCreate, int)) *VerificationCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &VerificationCreateBulk{err: fmt.Errorf("calling to VerificationClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*VerificationCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &VerificationCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for Verification.
+func (c *VerificationClient) Update() *VerificationUpdate {
+	mutation := newVerificationMutation(c.config, OpUpdate)
+	return &VerificationUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *VerificationClient) UpdateOne(v *Verification) *VerificationUpdateOne {
+	mutation := newVerificationMutation(c.config, OpUpdateOne, withVerification(v))
+	return &VerificationUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *VerificationClient) UpdateOneID(id int) *VerificationUpdateOne {
+	mutation := newVerificationMutation(c.config, OpUpdateOne, withVerificationID(id))
+	return &VerificationUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for Verification.
+func (c *VerificationClient) Delete() *VerificationDelete {
+	mutation := newVerificationMutation(c.config, OpDelete)
+	return &VerificationDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *VerificationClient) DeleteOne(v *Verification) *VerificationDeleteOne {
+	return c.DeleteOneID(v.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *VerificationClient) DeleteOneID(id int) *VerificationDeleteOne {
+	builder := c.Delete().Where(verification.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &VerificationDeleteOne{builder}
+}
+
+// Query returns a query builder for Verification.
+func (c *VerificationClient) Query() *VerificationQuery {
+	return &VerificationQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeVerification},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a Verification entity by its id.
+func (c *VerificationClient) Get(ctx context.Context, id int) (*Verification, error) {
+	return c.Query().Where(verification.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *VerificationClient) GetX(ctx context.Context, id int) *Verification {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *VerificationClient) Hooks() []Hook {
+	return c.hooks.Verification
+}
+
+// Interceptors returns the client interceptors.
+func (c *VerificationClient) Interceptors() []Interceptor {
+	return c.inters.Verification
+}
+
+func (c *VerificationClient) mutate(ctx context.Context, m *VerificationMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&VerificationCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&VerificationUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&VerificationUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&VerificationDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown Verification mutation op: %q", m.Op())
+	}
+}
+
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		Account, Session, User []ent.Hook
+		Account, RateLimit, Session, User, Verification []ent.Hook
 	}
 	inters struct {
-		Account, Session, User []ent.Interceptor
+		Account, RateLimit, Session, User, Verification []ent.Interceptor
 	}
 )

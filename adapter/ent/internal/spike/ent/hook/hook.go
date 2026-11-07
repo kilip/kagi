@@ -21,6 +21,18 @@ func (f AccountFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, err
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AccountMutation", m)
 }
 
+// The RateLimitFunc type is an adapter to allow the use of ordinary
+// function as RateLimit mutator.
+type RateLimitFunc func(context.Context, *ent.RateLimitMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f RateLimitFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.RateLimitMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RateLimitMutation", m)
+}
+
 // The SessionFunc type is an adapter to allow the use of ordinary
 // function as Session mutator.
 type SessionFunc func(context.Context, *ent.SessionMutation) (ent.Value, error)
@@ -43,6 +55,18 @@ func (f UserFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error)
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UserMutation", m)
+}
+
+// The VerificationFunc type is an adapter to allow the use of ordinary
+// function as Verification mutator.
+type VerificationFunc func(context.Context, *ent.VerificationMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f VerificationFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.VerificationMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.VerificationMutation", m)
 }
 
 // Condition is a hook condition function.

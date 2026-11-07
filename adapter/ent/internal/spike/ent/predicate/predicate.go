@@ -9,8 +9,14 @@ import (
 // Account is the predicate function for account builders.
 type Account func(*sql.Selector)
 
+// RateLimit is the predicate function for ratelimit builders.
+type RateLimit func(*sql.Selector)
+
 // Session is the predicate function for session builders.
 type Session func(*sql.Selector)
 
 // User is the predicate function for user builders.
 type User func(*sql.Selector)
+
+// Verification is the predicate function for verification builders.
+type Verification func(*sql.Selector)

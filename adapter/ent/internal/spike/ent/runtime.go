@@ -6,8 +6,10 @@ import (
 	"time"
 
 	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/account"
+	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/ratelimit"
 	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/session"
 	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/user"
+	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/verification"
 	"github.com/kilip/kagi/adapter/ent/internal/spike/schema"
 )
 
@@ -54,6 +56,19 @@ func init() {
 	account.DefaultUpdatedAt = accountDescUpdatedAt.Default.(func() time.Time)
 	// account.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
 	account.UpdateDefaultUpdatedAt = accountDescUpdatedAt.UpdateDefault.(func() time.Time)
+	ratelimitMixin := schema.RateLimit{}.Mixin()
+	ratelimitMixinFields0 := ratelimitMixin[0].Fields()
+	_ = ratelimitMixinFields0
+	ratelimitFields := schema.RateLimit{}.Fields()
+	_ = ratelimitFields
+	// ratelimitDescKey is the schema descriptor for key field.
+	ratelimitDescKey := ratelimitMixinFields0[0].Descriptor()
+	// ratelimit.KeyValidator is a validator for the "key" field. It is called by the builders before save.
+	ratelimit.KeyValidator = ratelimitDescKey.Validators[0].(func(string) error)
+	// ratelimitDescCount is the schema descriptor for count field.
+	ratelimitDescCount := ratelimitMixinFields0[1].Descriptor()
+	// ratelimit.DefaultCount holds the default value on creation for the count field.
+	ratelimit.DefaultCount = ratelimitDescCount.Default.(int)
 	sessionMixin := schema.Session{}.Mixin()
 	sessionMixinFields0 := sessionMixin[0].Fields()
 	_ = sessionMixinFields0
@@ -120,4 +135,35 @@ func init() {
 	user.DefaultUpdatedAt = userDescUpdatedAt.Default.(func() time.Time)
 	// user.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
 	user.UpdateDefaultUpdatedAt = userDescUpdatedAt.UpdateDefault.(func() time.Time)
+	verificationMixin := schema.Verification{}.Mixin()
+	verificationMixinFields0 := verificationMixin[0].Fields()
+	_ = verificationMixinFields0
+	verificationFields := schema.Verification{}.Fields()
+	_ = verificationFields
+	// verificationDescTarget is the schema descriptor for target field.
+	verificationDescTarget := verificationMixinFields0[0].Descriptor()
+	// verification.TargetValidator is a validator for the "target" field. It is called by the builders before save.
+	verification.TargetValidator = verificationDescTarget.Validators[0].(func(string) error)
+	// verificationDescType is the schema descriptor for type field.
+	verificationDescType := verificationMixinFields0[1].Descriptor()
+	// verification.TypeValidator is a validator for the "type" field. It is called by the builders before save.
+	verification.TypeValidator = verificationDescType.Validators[0].(func(string) error)
+	// verificationDescCodeHash is the schema descriptor for code_hash field.
+	verificationDescCodeHash := verificationMixinFields0[2].Descriptor()
+	// verification.CodeHashValidator is a validator for the "code_hash" field. It is called by the builders before save.
+	verification.CodeHashValidator = verificationDescCodeHash.Validators[0].(func(string) error)
+	// verificationDescAttempts is the schema descriptor for attempts field.
+	verificationDescAttempts := verificationMixinFields0[4].Descriptor()
+	// verification.DefaultAttempts holds the default value on creation for the attempts field.
+	verification.DefaultAttempts = verificationDescAttempts.Default.(int)
+	// verificationDescCreatedAt is the schema descriptor for created_at field.
+	verificationDescCreatedAt := verificationMixinFields0[5].Descriptor()
+	// verification.DefaultCreatedAt holds the default value on creation for the created_at field.
+	verification.DefaultCreatedAt = verificationDescCreatedAt.Default.(func() time.Time)
+	// verificationDescUpdatedAt is the schema descriptor for updated_at field.
+	verificationDescUpdatedAt := verificationMixinFields0[6].Descriptor()
+	// verification.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	verification.DefaultUpdatedAt = verificationDescUpdatedAt.Default.(func() time.Time)
+	// verification.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	verification.UpdateDefaultUpdatedAt = verificationDescUpdatedAt.UpdateDefault.(func() time.Time)
 }

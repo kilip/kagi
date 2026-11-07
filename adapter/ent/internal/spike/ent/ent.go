@@ -13,8 +13,10 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/account"
+	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/ratelimit"
 	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/session"
 	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/user"
+	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/verification"
 )
 
 // ent aliases to avoid import conflicts in user's code.
@@ -75,9 +77,11 @@ var (
 func checkColumn(table, column string) error {
 	initCheck.Do(func() {
 		columnCheck = sql.NewColumnCheck(map[string]func(string) bool{
-			account.Table: account.ValidColumn,
-			session.Table: session.ValidColumn,
-			user.Table:    user.ValidColumn,
+			account.Table:      account.ValidColumn,
+			ratelimit.Table:    ratelimit.ValidColumn,
+			session.Table:      session.ValidColumn,
+			user.Table:         user.ValidColumn,
+			verification.Table: verification.ValidColumn,
 		})
 	})
 	return columnCheck(table, column)

@@ -52,7 +52,7 @@ func TestEntcGeneration(t *testing.T) {
 		t.Fatalf("failed running entc.Generate with Kagi extension: %v", err)
 	}
 
-	for _, name := range []string{"kagi_user_store.go", "kagi_account_store.go", "kagi_session_store.go"} {
+	for _, name := range []string{"kagi_user_store.go", "kagi_account_store.go", "kagi_session_store.go", "kagi_verification_store.go", "kagi_rate_limit_store.go"} {
 		generatedFile := filepath.Join(tempTarget, name)
 		info, err := os.Stat(generatedFile)
 		if err != nil {
@@ -80,6 +80,22 @@ func TestKagiSessionStore_Conformance(t *testing.T) {
 	sessionStore := ent.NewKagiSessionStore(client)
 	userStore := ent.NewKagiUserStore(client)
 	adaptertest.RunSessionStoreTests(t, sessionStore, userStore)
+}
+
+func TestKagiVerificationStore_Conformance(t *testing.T) {
+	var _ kagi.VerificationStore = (*ent.KagiVerificationStore)(nil)
+
+	client := setupTestClient(t)
+	verificationStore := ent.NewKagiVerificationStore(client)
+	adaptertest.RunVerificationStoreTests(t, verificationStore)
+}
+
+func TestKagiRateLimitStore_Conformance(t *testing.T) {
+	var _ kagi.RateLimitStore = (*ent.KagiRateLimitStore)(nil)
+
+	client := setupTestClient(t)
+	rateLimitStore := ent.NewKagiRateLimitStore(client)
+	adaptertest.RunRateLimitStoreTests(t, rateLimitStore)
 }
 
 func TestKagiUserStore_Conformance(t *testing.T) {

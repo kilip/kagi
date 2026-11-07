@@ -39,6 +39,26 @@ var (
 			},
 		},
 	}
+	// RateLimitsColumns holds the columns for the "rate_limits" table.
+	RateLimitsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt, Increment: true},
+		{Name: "key", Type: field.TypeString, Unique: true},
+		{Name: "count", Type: field.TypeInt, Default: 0},
+		{Name: "expires_at", Type: field.TypeTime},
+	}
+	// RateLimitsTable holds the schema information for the "rate_limits" table.
+	RateLimitsTable = &schema.Table{
+		Name:       "rate_limits",
+		Columns:    RateLimitsColumns,
+		PrimaryKey: []*schema.Column{RateLimitsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "ratelimit_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{RateLimitsColumns[3]},
+			},
+		},
+	}
 	// SessionsColumns holds the columns for the "sessions" table.
 	SessionsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt, Increment: true},
@@ -85,11 +105,42 @@ var (
 		Columns:    UsersColumns,
 		PrimaryKey: []*schema.Column{UsersColumns[0]},
 	}
+	// VerificationsColumns holds the columns for the "verifications" table.
+	VerificationsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt, Increment: true},
+		{Name: "target", Type: field.TypeString},
+		{Name: "type", Type: field.TypeString},
+		{Name: "code_hash", Type: field.TypeString},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "attempts", Type: field.TypeInt, Default: 0},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// VerificationsTable holds the schema information for the "verifications" table.
+	VerificationsTable = &schema.Table{
+		Name:       "verifications",
+		Columns:    VerificationsColumns,
+		PrimaryKey: []*schema.Column{VerificationsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "verification_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{VerificationsColumns[4]},
+			},
+			{
+				Name:    "verification_target_type",
+				Unique:  false,
+				Columns: []*schema.Column{VerificationsColumns[1], VerificationsColumns[2]},
+			},
+		},
+	}
 	// Tables holds all the tables in the schema.
 	Tables = []*schema.Table{
 		AccountsTable,
+		RateLimitsTable,
 		SessionsTable,
 		UsersTable,
+		VerificationsTable,
 	}
 )
 

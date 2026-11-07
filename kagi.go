@@ -141,6 +141,11 @@ func New(cfg Config) (*Kagi, error) {
 	return k, nil
 }
 
+// UserStore returns the configured UserStore storage port.
+func (k *Kagi) UserStore() UserStore {
+	return k.cfg.UserStore
+}
+
 // Cleanup performs a single batched, idempotent deletion of expired sessions,
 // verifications, and rate limit counters (ADR-0010).
 //

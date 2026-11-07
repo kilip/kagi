@@ -101,6 +101,51 @@ func TestNew_Validation(t *testing.T) {
 			},
 			wantErr: kagi.ErrInvalidConfig,
 		},
+		{
+			name: "negative rate limit",
+			cfg: kagi.Config{
+				UserStore:         &mockUserStore{},
+				AccountStore:      &mockAccountStore{},
+				SessionStore:      &mockSessionStore{},
+				VerificationStore: &mockVerificationStore{},
+				RateLimitStore:    &mockRateLimitStore{},
+				Secret:            validSecret,
+				RateLimit: kagi.RateLimitConfig{
+					SignInEmail: kagi.LimitRule{Limit: -1, Window: 15 * time.Minute},
+				},
+			},
+			wantErr: kagi.ErrInvalidConfig,
+		},
+		{
+			name: "negative rate limit window",
+			cfg: kagi.Config{
+				UserStore:         &mockUserStore{},
+				AccountStore:      &mockAccountStore{},
+				SessionStore:      &mockSessionStore{},
+				VerificationStore: &mockVerificationStore{},
+				RateLimitStore:    &mockRateLimitStore{},
+				Secret:            validSecret,
+				RateLimit: kagi.RateLimitConfig{
+					SignInIP: kagi.LimitRule{Limit: 10, Window: -1 * time.Minute},
+				},
+			},
+			wantErr: kagi.ErrInvalidConfig,
+		},
+		{
+			name: "rate limit with zero window",
+			cfg: kagi.Config{
+				UserStore:         &mockUserStore{},
+				AccountStore:      &mockAccountStore{},
+				SessionStore:      &mockSessionStore{},
+				VerificationStore: &mockVerificationStore{},
+				RateLimitStore:    &mockRateLimitStore{},
+				Secret:            validSecret,
+				RateLimit: kagi.RateLimitConfig{
+					SignInEmail: kagi.LimitRule{Limit: 5, Window: 0},
+				},
+			},
+			wantErr: kagi.ErrInvalidConfig,
+		},
 	}
 
 	for _, tt := range tests {
@@ -197,6 +242,94 @@ func TestNew_FakeClockIntegration(t *testing.T) {
 	if remaining := cfg.Clock.Until(futureTarget); remaining != 15*time.Minute {
 		t.Fatalf("expected remaining duration %v, got %v", 15*time.Minute, remaining)
 	}
+}
+
+func TestNew_RateLimitDefaults(t *testing.T) {
+	validSecret := "a-very-long-master-secret-at-least-32-bytes-long"
+
+	t.Run("default rate limits applied when zero-valued", func(t *testing.T) {
+		cfg := kagi.Config{
+			UserStore:         &mockUserStore{},
+			AccountStore:      &mockAccountStore{},
+			SessionStore:      &mockSessionStore{},
+			VerificationStore: &mockVerificationStore{},
+			RateLimitStore:    &mockRateLimitStore{},
+			Secret:            validSecret,
+		}
+
+		k, err := kagi.New(cfg)
+		if err != nil {
+			t.Fatalf("kagi.New failed: %v", err)
+		}
+		limiter, rlCfg := kagi.CredentialServiceRateLimiterForTest(k.Credentials)
+		if limiter == nil {
+			t.Fatal("expected non-nil limiter when rate limiting enabled by default")
+		}
+		expectedDefaults := kagi.DefaultRateLimitConfig()
+		if rlCfg.SignInEmail != expectedDefaults.SignInEmail {
+			t.Errorf("expected SignInEmail %+v, got %+v", expectedDefaults.SignInEmail, rlCfg.SignInEmail)
+		}
+		if rlCfg.SignInIP != expectedDefaults.SignInIP {
+			t.Errorf("expected SignInIP %+v, got %+v", expectedDefaults.SignInIP, rlCfg.SignInIP)
+		}
+	})
+
+	t.Run("custom rate limits preserved", func(t *testing.T) {
+		customCfg := kagi.RateLimitConfig{
+			SignInEmail: kagi.LimitRule{Limit: 10, Window: 30 * time.Minute},
+			SignInIP:    kagi.LimitRule{Limit: 100, Window: 30 * time.Minute},
+		}
+		cfg := kagi.Config{
+			UserStore:         &mockUserStore{},
+			AccountStore:      &mockAccountStore{},
+			SessionStore:      &mockSessionStore{},
+			VerificationStore: &mockVerificationStore{},
+			RateLimitStore:    &mockRateLimitStore{},
+			Secret:            validSecret,
+			RateLimit:         customCfg,
+		}
+
+		k, err := kagi.New(cfg)
+		if err != nil {
+			t.Fatalf("kagi.New failed: %v", err)
+		}
+		limiter, rlCfg := kagi.CredentialServiceRateLimiterForTest(k.Credentials)
+		if limiter == nil {
+			t.Fatal("expected non-nil limiter")
+		}
+		if rlCfg.SignInEmail != customCfg.SignInEmail {
+			t.Errorf("expected SignInEmail %+v, got %+v", customCfg.SignInEmail, rlCfg.SignInEmail)
+		}
+		if rlCfg.SignInIP != customCfg.SignInIP {
+			t.Errorf("expected SignInIP %+v, got %+v", customCfg.SignInIP, rlCfg.SignInIP)
+		}
+	})
+
+	t.Run("disabled rate limiting produces nil limiter", func(t *testing.T) {
+		cfg := kagi.Config{
+			UserStore:         &mockUserStore{},
+			AccountStore:      &mockAccountStore{},
+			SessionStore:      &mockSessionStore{},
+			VerificationStore: &mockVerificationStore{},
+			RateLimitStore:    &mockRateLimitStore{},
+			Secret:            validSecret,
+			RateLimit: kagi.RateLimitConfig{
+				Disabled: true,
+			},
+		}
+
+		k, err := kagi.New(cfg)
+		if err != nil {
+			t.Fatalf("kagi.New failed: %v", err)
+		}
+		limiter, rlCfg := kagi.CredentialServiceRateLimiterForTest(k.Credentials)
+		if limiter != nil {
+			t.Fatalf("expected nil limiter when disabled, got %v", limiter)
+		}
+		if !rlCfg.Disabled {
+			t.Fatal("expected Disabled == true")
+		}
+	})
 }
 
 type cleanupTrackingSessionStore struct {
@@ -736,10 +869,12 @@ func TestKagi_SignInSignOutLifecycle(t *testing.T) {
 			t.Fatalf("SignUp failed: %v", err)
 		}
 
+		// Rate limiting calls IncrementRateLimit for auth identifier (and IP if provided)
+		mockSec.EXPECT().IncrementRateLimit(gomock.Any(), "rl:auth:charlie@example.com", 15*time.Minute).Return(1, nil).Times(1)
+
 		// SetSession must be called on SignIn with exact idle TTL
 		expectedTTL := kagi.DefaultSessionConfig().IdleTimeout
 		mockSec.EXPECT().SetSession(gomock.Any(), gomock.AssignableToTypeOf(&kagi.Session{}), expectedTTL).Return(nil).Times(1)
-
 		authResult, err := k.Credentials.SignIn(ctx, kagi.SignInInput{
 			Email:    "charlie@example.com",
 			Password: "CharliePassword123!",
@@ -831,6 +966,163 @@ func TestKagi_SignInSignOutLifecycle(t *testing.T) {
 		err = k.Sessions.SignOut(ctx, authResult.RawToken)
 		if !errors.Is(err, kagi.ErrSessionNotFound) {
 			t.Fatalf("expected ErrSessionNotFound on subsequent SignOut, got %v", err)
+		}
+	})
+}
+
+func TestKagi_SignInRateLimiting_Integration(t *testing.T) {
+	validSecret := "a-very-long-master-secret-at-least-32-bytes-long"
+	fixedTime := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+
+	t.Run("end-to-end rate limiting without Redis using RateLimitStore", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.Background()
+		fakeClk := clock.NewFake(fixedTime)
+		memStores := memory.NewStores(memory.WithClock(fakeClk))
+
+		cfg := kagi.Config{
+			UserStore:         memStores.User,
+			AccountStore:      memStores.Account,
+			SessionStore:      memStores.Session,
+			VerificationStore: memStores.Verification,
+			RateLimitStore:    memStores.RateLimit,
+			SecondaryStorage:  nil, // DB-backed rate limiting without Redis
+			Secret:            validSecret,
+			Password:          fastPasswordConfig(),
+			Clock:             fakeClk,
+			RateLimit: kagi.RateLimitConfig{
+				SignInEmail: kagi.LimitRule{Limit: 2, Window: 15 * time.Minute},
+				SignInIP:    kagi.LimitRule{Limit: 10, Window: 15 * time.Minute},
+			},
+		}
+
+		k, err := kagi.New(cfg)
+		if err != nil {
+			t.Fatalf("kagi.New failed: %v", err)
+		}
+
+		// Register user
+		_, err = k.Credentials.SignUp(ctx, kagi.SignUpInput{
+			Email:    "rl-db@example.com",
+			Password: "ValidPassword123!",
+			Name:     "RL User",
+		})
+		if err != nil {
+			t.Fatalf("SignUp failed: %v", err)
+		}
+
+		signInIn := kagi.SignInInput{
+			Email:     "rl-db@example.com",
+			Password:  "ValidPassword123!",
+			IPAddress: "192.168.1.50",
+		}
+
+		// Attempt 1: Success
+		res1, err := k.Credentials.SignIn(ctx, signInIn)
+		if err != nil {
+			t.Fatalf("attempt 1 failed: %v", err)
+		}
+		if res1 == nil || res1.Session == nil {
+			t.Fatal("expected session on attempt 1")
+		}
+
+		// Attempt 2: Success
+		res2, err := k.Credentials.SignIn(ctx, signInIn)
+		if err != nil {
+			t.Fatalf("attempt 2 failed: %v", err)
+		}
+		if res2 == nil || res2.Session == nil {
+			t.Fatal("expected session on attempt 2")
+		}
+
+		// Attempt 3: Exceeds limit 2 -> ErrRateLimitExceeded
+		_, err = k.Credentials.SignIn(ctx, signInIn)
+		if !errors.Is(err, kagi.ErrRateLimitExceeded) {
+			t.Fatalf("expected ErrRateLimitExceeded on attempt 3, got: %v", err)
+		}
+	})
+
+	t.Run("end-to-end rate limiting with Redis using mocked SecondaryStorage", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+
+		ctx := context.Background()
+		fakeClk := clock.NewFake(fixedTime)
+		memStores := memory.NewStores(memory.WithClock(fakeClk))
+
+		cfg := kagi.Config{
+			UserStore:         memStores.User,
+			AccountStore:      memStores.Account,
+			SessionStore:      memStores.Session,
+			VerificationStore: memStores.Verification,
+			RateLimitStore:    memStores.RateLimit,
+			SecondaryStorage:  mockSec,
+			Secret:            validSecret,
+			Password:          fastPasswordConfig(),
+			Clock:             fakeClk,
+			RateLimit: kagi.RateLimitConfig{
+				SignInEmail: kagi.LimitRule{Limit: 2, Window: 15 * time.Minute},
+				SignInIP:    kagi.LimitRule{Limit: 10, Window: 15 * time.Minute},
+			},
+		}
+
+		k, err := kagi.New(cfg)
+		if err != nil {
+			t.Fatalf("kagi.New failed: %v", err)
+		}
+
+		// Register user
+		_, err = k.Credentials.SignUp(ctx, kagi.SignUpInput{
+			Email:    "rl-redis@example.com",
+			Password: "ValidPassword123!",
+			Name:     "RL User Redis",
+		})
+		if err != nil {
+			t.Fatalf("SignUp failed: %v", err)
+		}
+
+		signInIn := kagi.SignInInput{
+			Email:     "rl-redis@example.com",
+			Password:  "ValidPassword123!",
+			IPAddress: "192.168.1.60",
+		}
+
+		// Attempt 1: IncrementRateLimit called on mockSec for IP then Email
+		mockSec.EXPECT().IncrementRateLimit(gomock.Any(), "rl:ip:192.168.1.60", 15*time.Minute).Return(1, nil).Times(1)
+		mockSec.EXPECT().IncrementRateLimit(gomock.Any(), "rl:auth:rl-redis@example.com", 15*time.Minute).Return(1, nil).Times(1)
+		mockSec.EXPECT().SetSession(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).Times(1)
+
+		res1, err := k.Credentials.SignIn(ctx, signInIn)
+		if err != nil {
+			t.Fatalf("attempt 1 failed: %v", err)
+		}
+		if res1 == nil || res1.Session == nil {
+			t.Fatal("expected session on attempt 1")
+		}
+
+		// Attempt 2: IncrementRateLimit returns 2 (at limit)
+		mockSec.EXPECT().IncrementRateLimit(gomock.Any(), "rl:ip:192.168.1.60", 15*time.Minute).Return(2, nil).Times(1)
+		mockSec.EXPECT().IncrementRateLimit(gomock.Any(), "rl:auth:rl-redis@example.com", 15*time.Minute).Return(2, nil).Times(1)
+		mockSec.EXPECT().SetSession(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).Times(1)
+
+		res2, err := k.Credentials.SignIn(ctx, signInIn)
+		if err != nil {
+			t.Fatalf("attempt 2 failed: %v", err)
+		}
+		if res2 == nil || res2.Session == nil {
+			t.Fatal("expected session on attempt 2")
+		}
+
+		// Attempt 3: IP returns 3 (count <= 10 allowed), Email returns 3 (count > 2 exceeded)
+		mockSec.EXPECT().IncrementRateLimit(gomock.Any(), "rl:ip:192.168.1.60", 15*time.Minute).Return(3, nil).Times(1)
+		mockSec.EXPECT().IncrementRateLimit(gomock.Any(), "rl:auth:rl-redis@example.com", 15*time.Minute).Return(3, nil).Times(1)
+
+		_, err = k.Credentials.SignIn(ctx, signInIn)
+		if !errors.Is(err, kagi.ErrRateLimitExceeded) {
+			t.Fatalf("expected ErrRateLimitExceeded on attempt 3, got: %v", err)
 		}
 	})
 }

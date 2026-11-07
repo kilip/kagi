@@ -167,6 +167,7 @@ type Config struct {
     Session           SessionConfig
     Password          PasswordConfig
     OTP               OTPConfig
+    RateLimit         RateLimitConfig
 
     // Deterministic clock for testing (defaults to real system clock)
     Clock             clock.Clock
@@ -192,7 +193,33 @@ type Config struct {
 | | `Length` | `6` | Number of numeric digits |
 | | `MaxAttempts` | `5` | Maximum failed attempts before code invalidation |
 | | `ResendDelay` | `60 * time.Second` | Mandatory cooldown window between resend requests |
+| **RateLimit** | `SignInEmail.Limit` | `5` | Max sign-in attempts per email window (OWASP targeted brute-force protection) |
+| | `SignInEmail.Window`| `15 * time.Minute` | Window duration for email sign-in attempts |
+| | `SignInIP.Limit` | `30` | Max sign-in attempts per IP window (OWASP credential stuffing protection across NAT/gateways) |
+| | `SignInIP.Window` | `15 * time.Minute` | Window duration for IP sign-in attempts |
+| | `Disabled` | `false` | When true, disables all rate limiting |
 
+### Rate Limiting Policy (`kagi.RateLimitConfig`)
+
+Kagi enforces rate limiting across authentication flows per [ADR-0004](./adr/0004-data-model.md) and [ADR-0007](./adr/0007-storage-ports-and-conformance.md):
+
+```go
+type LimitRule struct {
+    Limit  int           // Maximum allowed attempts within Window (0 or negative disables the rule)
+    Window time.Duration // Duration of the fixed window
+}
+
+type RateLimitConfig struct {
+    Disabled    bool      // Disables rate limiting when true
+    SignInEmail LimitRule // Rate limit per email address for sign-in attempts
+    SignInIP    LimitRule // Rate limit per IP address for sign-in attempts
+}
+```
+
+- **Safe Defaults:** `DefaultRateLimitConfig()` provides OWASP-recommended protection (5 attempts / 15 min per email; 30 attempts / 15 min per IP). If `kagi.New` is called with `RateLimit` zero-valued and `!RateLimit.Disabled`, safe defaults are automatically applied.
+- **Works Without Redis:** Rate limiting operates out of the box against the primary database (`RateLimitStore`) using atomic fixed-window upserts.
+- **Optional Redis Acceleration:** When `SecondaryStorage` is configured, rate limiting calls route directly to `SecondaryStorage.IncrementRateLimit`, bypassing the primary database to eliminate write load.
+- **Error Handling:** When a limit is exceeded, operations return `kagi.ErrRateLimitExceeded`, which HTTP adapters map to `429 Too Many Requests`.
 ---
 
 ---

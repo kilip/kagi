@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kilip/kagi/internal/clock"
+	"github.com/kilip/kagi/internal/ratelimit"
 )
 
 // Config configures the core Kagi authentication engine.
@@ -34,9 +35,10 @@ type Config struct {
 	OAuthProviders map[string]OAuthProvider
 
 	// Subsystem Policies (Optional with secure defaults)
-	Session  SessionConfig
-	Password PasswordConfig
-	OTP      OTPConfig
+	Session   SessionConfig
+	Password  PasswordConfig
+	OTP       OTPConfig
+	RateLimit RateLimitConfig
 
 	// Deterministic clock for unit testing (defaults to real system clock)
 	Clock clock.Clock
@@ -77,6 +79,11 @@ func New(cfg Config) (*Kagi, error) {
 	if cfg.Clock == nil {
 		cfg.Clock = clock.RealClock{}
 	}
+	if !cfg.RateLimit.Disabled &&
+		cfg.RateLimit.SignInEmail.Limit == 0 && cfg.RateLimit.SignInEmail.Window == 0 &&
+		cfg.RateLimit.SignInIP.Limit == 0 && cfg.RateLimit.SignInIP.Window == 0 {
+		cfg.RateLimit = DefaultRateLimitConfig()
+	}
 
 	// Invariant validation (ADR-0014)
 	if cfg.Session.RenewalThreshold <= 0 || cfg.Session.RenewalThreshold >= 1 {
@@ -87,10 +94,30 @@ func New(cfg Config) (*Kagi, error) {
 		cfg.Session.IdleTimeout > cfg.Session.AbsoluteTimeout {
 		return nil, ErrInvalidConfig
 	}
+	if err := ValidateRateLimitConfig(cfg.RateLimit); err != nil {
+		return nil, err
+	}
+
+	var limiter *ratelimit.Limiter
+	if !cfg.RateLimit.Disabled {
+		var rlStore ratelimit.Store
+		if cfg.SecondaryStorage != nil {
+			rlStore = ratelimit.StoreFunc(cfg.SecondaryStorage.IncrementRateLimit)
+		} else {
+			rlStore = cfg.RateLimitStore
+		}
+		limiter = ratelimit.New(rlStore)
+	}
 
 	sessions := NewSessionService(cfg.SessionStore, cfg.SecondaryStorage, cfg.Session, cfg.Clock)
-	credentials := NewCredentialService(cfg.UserStore, cfg.AccountStore, cfg.Password, cfg.Clock, WithSessionService(sessions))
-
+	credentials := NewCredentialService(
+		cfg.UserStore,
+		cfg.AccountStore,
+		cfg.Password,
+		cfg.Clock,
+		WithSessionService(sessions),
+		WithRateLimiter(limiter, cfg.RateLimit),
+	)
 	k := &Kagi{
 		Credentials: credentials,
 		Sessions:    sessions,

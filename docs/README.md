@@ -15,4 +15,4 @@ Welcome to the Kagi documentation portal. Kagi (鍵) is a reusable, framework-ag
 
 ## Roadmap & Milestones
 
-- [**GitHub Project Board**](https://github.com/users/kilip/projects/11) — Implementation roadmap across milestones M0 through M8.
+- [**GitHub Project Board**](https://github.com/users/kilip/projects/11) — Implementation roadmap across milestones M0 through M10.

@@ -2,6 +2,7 @@ package kagi_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -1082,6 +1083,116 @@ func TestValidate(t *testing.T) {
 			t.Fatalf("expected nil session and false renewed")
 		}
 	})
+
+	t.Run("sliding renewal threshold table driven edge cases", func(t *testing.T) {
+		t.Parallel()
+
+		// Config: IdleTimeout = 7 days, AbsoluteTimeout = 30 days, RenewalThreshold = 0.5.
+		// Threshold duration = 7 days * 0.5 = 3.5 days (84 hours).
+		testCases := []struct {
+			name           string
+			remaining      time.Duration
+			expectRenewal  bool
+			expectedOffset time.Duration // offset from now for new ExpiresAt if renewed
+		}{
+			{
+				name:           "strictly above threshold (remaining 4 days > 3.5 days) => no renewal",
+				remaining:      4 * 24 * time.Hour,
+				expectRenewal:  false,
+				expectedOffset: 4 * 24 * time.Hour,
+			},
+			{
+				name:           "just above threshold (remaining 3.5 days + 1s) => no renewal",
+				remaining:      84*time.Hour + time.Second,
+				expectRenewal:  false,
+				expectedOffset: 84*time.Hour + time.Second,
+			},
+			{
+				name:           "exact boundary at threshold (remaining 3.5 days == 3.5 days) => renewal triggered",
+				remaining:      84 * time.Hour,
+				expectRenewal:  true,
+				expectedOffset: 7 * 24 * time.Hour,
+			},
+			{
+				name:           "just below threshold (remaining 3.5 days - 1s) => renewal triggered",
+				remaining:      84*time.Hour - time.Second,
+				expectRenewal:  true,
+				expectedOffset: 7 * 24 * time.Hour,
+			},
+			{
+				name:           "strictly below threshold (remaining 1 day < 3.5 days) => renewal triggered",
+				remaining:      24 * time.Hour,
+				expectRenewal:  true,
+				expectedOffset: 7 * 24 * time.Hour,
+			},
+		}
+
+		for _, tc := range testCases {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				fakeClk := clock.NewFake(fixedTime)
+				ctrl := gomock.NewController(t)
+				mockStore := mock.NewMockSessionStore(ctrl)
+				mockSec := mock.NewMockSecondaryStorage(ctrl)
+				cfg := kagi.DefaultSessionConfig()
+				svc := kagi.NewSessionService(mockStore, mockSec, cfg, fakeClk)
+
+				rawToken, err := crypto.GenerateSessionToken()
+				if err != nil {
+					t.Fatalf("failed to generate token: %v", err)
+				}
+				tokenHash := crypto.HashToken(rawToken)
+
+				createdAt := fixedTime.Add(-10 * 24 * time.Hour)
+				initialExpiresAt := fixedTime.Add(tc.remaining)
+				existingSession := &kagi.Session{
+					ID:        "sess-" + strings.ReplaceAll(tc.name, " ", "-"),
+					UserID:    "user-threshold",
+					TokenHash: tokenHash,
+					ExpiresAt: initialExpiresAt,
+					CreatedAt: createdAt,
+					UpdatedAt: createdAt,
+				}
+
+				mockSec.EXPECT().GetSession(gomock.Any(), tokenHash).Return(nil, nil).Times(1)
+				mockStore.EXPECT().GetByTokenHash(gomock.Any(), tokenHash).Return(existingSession, nil).Times(1)
+
+				if tc.expectRenewal {
+					expectedNewExpiresAt := fixedTime.Add(tc.expectedOffset)
+					mockStore.EXPECT().Update(gomock.Any(), gomock.AssignableToTypeOf(&kagi.Session{})).DoAndReturn(
+						func(_ context.Context, s *kagi.Session) error {
+							if !s.ExpiresAt.Equal(expectedNewExpiresAt) {
+								t.Errorf("expected new ExpiresAt %v, got %v", expectedNewExpiresAt, s.ExpiresAt)
+							}
+							if !s.UpdatedAt.Equal(fixedTime) {
+								t.Errorf("expected UpdatedAt %v, got %v", fixedTime, s.UpdatedAt)
+							}
+							return nil
+						},
+					).Times(1)
+					expectedTTL := expectedNewExpiresAt.Sub(fixedTime)
+					mockSec.EXPECT().SetSession(gomock.Any(), gomock.AssignableToTypeOf(&kagi.Session{}), expectedTTL).Return(nil).Times(1)
+				} else {
+					// Backfill cache with existing session
+					mockSec.EXPECT().SetSession(gomock.Any(), existingSession, tc.remaining).Return(nil).Times(1)
+				}
+
+				sess, renewed, err := svc.Validate(context.Background(), rawToken)
+				if err != nil {
+					t.Fatalf("expected nil error, got %v", err)
+				}
+				if renewed != tc.expectRenewal {
+					t.Fatalf("expected renewed=%v, got %v", tc.expectRenewal, renewed)
+				}
+				expectedFinalExpiresAt := fixedTime.Add(tc.expectedOffset)
+				if !sess.ExpiresAt.Equal(expectedFinalExpiresAt) {
+					t.Fatalf("expected ExpiresAt %v, got %v", expectedFinalExpiresAt, sess.ExpiresAt)
+				}
+			})
+		}
+	})
 }
 func TestSessionService_Rotate(t *testing.T) {
 	t.Parallel()
@@ -1797,8 +1908,73 @@ func TestSessionService_Rotate(t *testing.T) {
 			t.Fatalf("expected original CreatedAt preserved")
 		}
 	})
-}
 
+	t.Run("multiple sequential rotations strictly preserve CreatedAt across 3+ rotations and clamp to absolute ceiling", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		memStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		cfg := kagi.DefaultSessionConfig()
+		// AbsoluteTimeout is 30 days.
+		// Session created 29 days ago. Hard absolute ceiling is CreatedAt + 30 days = fixedTime + 1 day.
+		initialCreatedAt := fixedTime.Add(-29 * 24 * time.Hour)
+		absCeiling := initialCreatedAt.Add(cfg.AbsoluteTimeout) // fixedTime + 24 hours
+
+		svc := kagi.NewSessionService(memStore, nil, cfg, fakeClk)
+
+		initialRawToken, err := crypto.GenerateSessionToken()
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+		initialHash := crypto.HashToken(initialRawToken)
+
+		sess := &kagi.Session{
+			UserID:    "user-seq-rotate",
+			TokenHash: initialHash,
+			ExpiresAt: fixedTime.Add(12 * time.Hour),
+			CreatedAt: initialCreatedAt,
+			UpdatedAt: initialCreatedAt,
+		}
+		if err := memStore.Create(context.Background(), sess); err != nil {
+			t.Fatalf("failed to create session: %v", err)
+		}
+
+		currentToken := initialRawToken
+		const rotationRounds = 5
+
+		for round := 1; round <= rotationRounds; round++ {
+			// Advance clock slightly (e.g. 1 hour per rotation)
+			fakeClk.Advance(1 * time.Hour)
+
+			newToken, rotatedSess, err := svc.Rotate(context.Background(), currentToken)
+			if err != nil {
+				t.Fatalf("rotation round %d failed: %v", round, err)
+			}
+			if newToken == "" || newToken == currentToken {
+				t.Fatalf("rotation round %d: expected new token, got %q", round, newToken)
+			}
+			if rotatedSess.TokenHash != crypto.HashToken(newToken) {
+				t.Fatalf("rotation round %d: token hash mismatch", round)
+			}
+			// Assert CreatedAt is strictly preserved across all rotations
+			if !rotatedSess.CreatedAt.Equal(initialCreatedAt) {
+				t.Fatalf("rotation round %d: CreatedAt mutated, expected %v, got %v", round, initialCreatedAt, rotatedSess.CreatedAt)
+			}
+			// Assert absolute ceiling clamping: ExpiresAt must never exceed absCeiling
+			if !rotatedSess.ExpiresAt.Equal(absCeiling) {
+				t.Fatalf("rotation round %d: expected ExpiresAt clamped to absolute ceiling %v, got %v", round, absCeiling, rotatedSess.ExpiresAt)
+			}
+
+			// Verify old token cannot be rotated again
+			_, _, err = svc.Rotate(context.Background(), currentToken)
+			if !errors.Is(err, kagi.ErrSessionNotFound) {
+				t.Fatalf("rotation round %d: reusing previous token should return ErrSessionNotFound, got %v", round, err)
+			}
+
+			currentToken = newToken
+		}
+	})
+}
 func TestSessionService_Revoke(t *testing.T) {
 	t.Parallel()
 
@@ -2463,6 +2639,58 @@ func TestSessionService_List(t *testing.T) {
 		}
 		if sessions != nil {
 			t.Fatalf("expected nil sessions on error")
+		}
+	})
+
+	t.Run("security: JSON serialization of Session and List results never leak TokenHash", func(t *testing.T) {
+
+		fakeClk := clock.NewFake(fixedTime)
+		memStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		svc := kagi.NewSessionService(memStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		sess1, _, err := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_sec", false, "192.168.1.1", "agent-sec")
+		if err != nil {
+			t.Fatalf("failed to create session: %v", err)
+		}
+
+		// 1. Direct Session JSON marshaling test (verifying json:"-" tag)
+		directSession := &kagi.Session{
+			ID:        sess1.ID,
+			UserID:    sess1.UserID,
+			TokenHash: "super_secret_token_hash_value_that_must_never_leak",
+			ExpiresAt: sess1.ExpiresAt,
+			IPAddress: sess1.IPAddress,
+			UserAgent: sess1.UserAgent,
+			CreatedAt: sess1.CreatedAt,
+			UpdatedAt: sess1.UpdatedAt,
+		}
+		directJSON, err := json.Marshal(directSession)
+		if err != nil {
+			t.Fatalf("failed to marshal session: %v", err)
+		}
+		if strings.Contains(string(directJSON), "super_secret_token_hash") || strings.Contains(string(directJSON), "token_hash") {
+			t.Fatalf("security violation: Session JSON marshaling leaked token hash or field: %s", string(directJSON))
+		}
+
+		// 2. List results security test: TokenHash must be empty string in struct AND absent from JSON
+		listSessions, err := svc.List(context.Background(), "user_sec")
+		if err != nil {
+			t.Fatalf("failed to list sessions: %v", err)
+		}
+		if len(listSessions) == 0 {
+			t.Fatalf("expected non-empty list of sessions")
+		}
+		for _, s := range listSessions {
+			if s.TokenHash != "" {
+				t.Errorf("security violation: List returned session with non-empty TokenHash: %q", s.TokenHash)
+			}
+			listJSON, err := json.Marshal(s)
+			if err != nil {
+				t.Fatalf("failed to marshal listed session: %v", err)
+			}
+			if strings.Contains(string(listJSON), "token_hash") {
+				t.Errorf("security violation: listed session JSON output contained token_hash: %s", string(listJSON))
+			}
 		}
 	})
 }

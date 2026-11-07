@@ -135,6 +135,10 @@ func init() {
 	user.DefaultUpdatedAt = userDescUpdatedAt.Default.(func() time.Time)
 	// user.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
 	user.UpdateDefaultUpdatedAt = userDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// userDescAvatarURL is the schema descriptor for avatar_url field.
+	userDescAvatarURL := userFields[1].Descriptor()
+	// user.DefaultAvatarURL holds the default value on creation for the avatar_url field.
+	user.DefaultAvatarURL = userDescAvatarURL.Default.(string)
 	verificationMixin := schema.Verification{}.Mixin()
 	verificationMixinFields0 := verificationMixin[0].Fields()
 	_ = verificationMixinFields0

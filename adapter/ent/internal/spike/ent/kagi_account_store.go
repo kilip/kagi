@@ -10,14 +10,43 @@ import (
 	account "github.com/kilip/kagi/adapter/ent/internal/spike/ent/account"
 )
 
+// AccountCreateHook is a hook function invoked before saving a new account builder.
+type AccountCreateHook func(ctx context.Context, b *AccountCreate, a *kagi.Account) error
+
+// AccountUpdateHook is a hook function invoked before updating an account builder.
+type AccountUpdateHook func(ctx context.Context, b *AccountUpdateOne, a *kagi.Account) error
+
+// AccountStoreOption configures a KagiAccountStore.
+type AccountStoreOption func(*KagiAccountStore)
+
+// WithAccountCreateHook registers a hook to be executed prior to creating an account.
+func WithAccountCreateHook(hook AccountCreateHook) AccountStoreOption {
+	return func(s *KagiAccountStore) {
+		s.createHooks = append(s.createHooks, hook)
+	}
+}
+
+// WithAccountUpdateHook registers a hook to be executed prior to updating an account.
+func WithAccountUpdateHook(hook AccountUpdateHook) AccountStoreOption {
+	return func(s *KagiAccountStore) {
+		s.updateHooks = append(s.updateHooks, hook)
+	}
+}
+
 // KagiAccountStore implements kagi.AccountStore using the ent client.
 type KagiAccountStore struct {
-	client *Client
+	client      *Client
+	createHooks []AccountCreateHook
+	updateHooks []AccountUpdateHook
 }
 
 // NewKagiAccountStore creates a new kagi.AccountStore backed by ent.
-func NewKagiAccountStore(client *Client) *KagiAccountStore {
-	return &KagiAccountStore{client: client}
+func NewKagiAccountStore(client *Client, opts ...AccountStoreOption) *KagiAccountStore {
+	s := &KagiAccountStore{client: client}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 var _ kagi.AccountStore = (*KagiAccountStore)(nil)
@@ -40,6 +69,12 @@ func (s *KagiAccountStore) Create(ctx context.Context, a *kagi.Account) error {
 	}
 	if !a.UpdatedAt.IsZero() {
 		builder.SetUpdatedAt(a.UpdatedAt)
+	}
+
+	for _, hook := range s.createHooks {
+		if err := hook(ctx, builder, a); err != nil {
+			return err
+		}
 	}
 
 	created, err := builder.Save(ctx)
@@ -129,6 +164,12 @@ func (s *KagiAccountStore) Update(ctx context.Context, a *kagi.Account) error {
 
 	if !a.UpdatedAt.IsZero() {
 		builder.SetUpdatedAt(a.UpdatedAt)
+	}
+
+	for _, hook := range s.updateHooks {
+		if err := hook(ctx, builder, a); err != nil {
+			return err
+		}
 	}
 
 	err = builder.Exec(ctx)

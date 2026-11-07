@@ -11,14 +11,32 @@ import (
 	verification "github.com/kilip/kagi/adapter/ent/internal/spike/ent/verification"
 )
 
+// VerificationCreateHook is a hook function invoked before saving a new verification builder.
+type VerificationCreateHook func(ctx context.Context, b *VerificationCreate, v *kagi.Verification) error
+
+// VerificationStoreOption configures a KagiVerificationStore.
+type VerificationStoreOption func(*KagiVerificationStore)
+
+// WithVerificationCreateHook registers a hook to be executed prior to creating a verification record.
+func WithVerificationCreateHook(hook VerificationCreateHook) VerificationStoreOption {
+	return func(s *KagiVerificationStore) {
+		s.createHooks = append(s.createHooks, hook)
+	}
+}
+
 // KagiVerificationStore implements kagi.VerificationStore using the ent client.
 type KagiVerificationStore struct {
-	client *Client
+	client      *Client
+	createHooks []VerificationCreateHook
 }
 
 // NewKagiVerificationStore creates a new kagi.VerificationStore backed by ent.
-func NewKagiVerificationStore(client *Client) *KagiVerificationStore {
-	return &KagiVerificationStore{client: client}
+func NewKagiVerificationStore(client *Client, opts ...VerificationStoreOption) *KagiVerificationStore {
+	s := &KagiVerificationStore{client: client}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 var _ kagi.VerificationStore = (*KagiVerificationStore)(nil)
@@ -41,6 +59,12 @@ func (s *KagiVerificationStore) Create(ctx context.Context, v *kagi.Verification
 	}
 	if !v.UpdatedAt.IsZero() {
 		builder.SetUpdatedAt(v.UpdatedAt)
+	}
+
+	for _, hook := range s.createHooks {
+		if err := hook(ctx, builder, v); err != nil {
+			return err
+		}
 	}
 
 	created, err := builder.Save(ctx)

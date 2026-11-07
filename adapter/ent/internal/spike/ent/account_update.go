@@ -156,6 +156,26 @@ func (au *AccountUpdate) SetUpdatedAt(t time.Time) *AccountUpdate {
 	return au
 }
 
+// SetMetadata sets the "metadata" field.
+func (au *AccountUpdate) SetMetadata(s string) *AccountUpdate {
+	au.mutation.SetMetadata(s)
+	return au
+}
+
+// SetNillableMetadata sets the "metadata" field if the given value is not nil.
+func (au *AccountUpdate) SetNillableMetadata(s *string) *AccountUpdate {
+	if s != nil {
+		au.SetMetadata(*s)
+	}
+	return au
+}
+
+// ClearMetadata clears the value of the "metadata" field.
+func (au *AccountUpdate) ClearMetadata() *AccountUpdate {
+	au.mutation.ClearMetadata()
+	return au
+}
+
 // Mutation returns the AccountMutation object of the builder.
 func (au *AccountUpdate) Mutation() *AccountMutation {
 	return au.mutation
@@ -264,6 +284,12 @@ func (au *AccountUpdate) sqlSave(ctx context.Context) (n int, err error) {
 	}
 	if value, ok := au.mutation.UpdatedAt(); ok {
 		_spec.SetField(account.FieldUpdatedAt, field.TypeTime, value)
+	}
+	if value, ok := au.mutation.Metadata(); ok {
+		_spec.SetField(account.FieldMetadata, field.TypeString, value)
+	}
+	if au.mutation.MetadataCleared() {
+		_spec.ClearField(account.FieldMetadata, field.TypeString)
 	}
 	if n, err = sqlgraph.UpdateNodes(ctx, au.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -413,6 +439,26 @@ func (auo *AccountUpdateOne) SetUpdatedAt(t time.Time) *AccountUpdateOne {
 	return auo
 }
 
+// SetMetadata sets the "metadata" field.
+func (auo *AccountUpdateOne) SetMetadata(s string) *AccountUpdateOne {
+	auo.mutation.SetMetadata(s)
+	return auo
+}
+
+// SetNillableMetadata sets the "metadata" field if the given value is not nil.
+func (auo *AccountUpdateOne) SetNillableMetadata(s *string) *AccountUpdateOne {
+	if s != nil {
+		auo.SetMetadata(*s)
+	}
+	return auo
+}
+
+// ClearMetadata clears the value of the "metadata" field.
+func (auo *AccountUpdateOne) ClearMetadata() *AccountUpdateOne {
+	auo.mutation.ClearMetadata()
+	return auo
+}
+
 // Mutation returns the AccountMutation object of the builder.
 func (auo *AccountUpdateOne) Mutation() *AccountMutation {
 	return auo.mutation
@@ -551,6 +597,12 @@ func (auo *AccountUpdateOne) sqlSave(ctx context.Context) (_node *Account, err e
 	}
 	if value, ok := auo.mutation.UpdatedAt(); ok {
 		_spec.SetField(account.FieldUpdatedAt, field.TypeTime, value)
+	}
+	if value, ok := auo.mutation.Metadata(); ok {
+		_spec.SetField(account.FieldMetadata, field.TypeString, value)
+	}
+	if auo.mutation.MetadataCleared() {
+		_spec.ClearField(account.FieldMetadata, field.TypeString)
 	}
 	_node = &Account{config: auo.config}
 	_spec.Assign = _node.assignValues

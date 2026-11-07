@@ -11,17 +11,35 @@ import (
 	ratelimit "github.com/kilip/kagi/adapter/ent/internal/spike/ent/ratelimit"
 )
 
+// RateLimitCreateHook is a hook function invoked before saving a new rate limit builder.
+type RateLimitCreateHook func(ctx context.Context, b *RateLimitCreate, key string) error
+
+// RateLimitStoreOption configures a KagiRateLimitStore.
+type RateLimitStoreOption func(*KagiRateLimitStore)
+
+// WithRateLimitCreateHook registers a hook to be executed prior to creating a rate limit record.
+func WithRateLimitCreateHook(hook RateLimitCreateHook) RateLimitStoreOption {
+	return func(s *KagiRateLimitStore) {
+		s.createHooks = append(s.createHooks, hook)
+	}
+}
+
 // KagiRateLimitStore implements kagi.RateLimitStore using the ent client.
 // It uses a sync.Mutex combined with database transactions to ensure thread safety
 // under concurrent goroutines without SQLite table lock contention.
 type KagiRateLimitStore struct {
-	client *Client
-	mu     sync.Mutex
+	client      *Client
+	mu          sync.Mutex
+	createHooks []RateLimitCreateHook
 }
 
 // NewKagiRateLimitStore creates a new kagi.RateLimitStore backed by ent.
-func NewKagiRateLimitStore(client *Client) *KagiRateLimitStore {
-	return &KagiRateLimitStore{client: client}
+func NewKagiRateLimitStore(client *Client, opts ...RateLimitStoreOption) *KagiRateLimitStore {
+	s := &KagiRateLimitStore{client: client}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 var _ kagi.RateLimitStore = (*KagiRateLimitStore)(nil)
@@ -53,11 +71,16 @@ func (s *KagiRateLimitStore) Increment(ctx context.Context, key string, window t
 		}
 		// Entry does not exist: create with count = 1 and expires_at = now + window
 		newExpiresAt := now.Add(window)
-		_, err := tx.RateLimit.Create().
+		builder := tx.RateLimit.Create().
 			SetKey(key).
 			SetCount(1).
-			SetExpiresAt(newExpiresAt).
-			Save(ctx)
+			SetExpiresAt(newExpiresAt)
+		for _, hook := range s.createHooks {
+			if err := hook(ctx, builder, key); err != nil {
+				return 0, err
+			}
+		}
+		_, err := builder.Save(ctx)
 		if err != nil {
 			return 0, err
 		}

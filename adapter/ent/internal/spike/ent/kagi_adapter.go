@@ -6,6 +6,53 @@ import (
 	"github.com/kilip/kagi/adaptertest"
 )
 
+// adapterConfig holds options for configuring KagiAdapter and its underlying stores.
+type adapterConfig struct {
+	userStoreOpts         []UserStoreOption
+	accountStoreOpts      []AccountStoreOption
+	sessionStoreOpts      []SessionStoreOption
+	verificationStoreOpts []VerificationStoreOption
+	rateLimitStoreOpts    []RateLimitStoreOption
+}
+
+// AdapterOption configures a KagiAdapter.
+type AdapterOption func(*adapterConfig)
+
+// WithUserStoreOptions forwards options to the KagiUserStore constructor.
+func WithUserStoreOptions(opts ...UserStoreOption) AdapterOption {
+	return func(c *adapterConfig) {
+		c.userStoreOpts = append(c.userStoreOpts, opts...)
+	}
+}
+
+// WithAccountStoreOptions forwards options to the KagiAccountStore constructor.
+func WithAccountStoreOptions(opts ...AccountStoreOption) AdapterOption {
+	return func(c *adapterConfig) {
+		c.accountStoreOpts = append(c.accountStoreOpts, opts...)
+	}
+}
+
+// WithSessionStoreOptions forwards options to the KagiSessionStore constructor.
+func WithSessionStoreOptions(opts ...SessionStoreOption) AdapterOption {
+	return func(c *adapterConfig) {
+		c.sessionStoreOpts = append(c.sessionStoreOpts, opts...)
+	}
+}
+
+// WithVerificationStoreOptions forwards options to the KagiVerificationStore constructor.
+func WithVerificationStoreOptions(opts ...VerificationStoreOption) AdapterOption {
+	return func(c *adapterConfig) {
+		c.verificationStoreOpts = append(c.verificationStoreOpts, opts...)
+	}
+}
+
+// WithRateLimitStoreOptions forwards options to the KagiRateLimitStore constructor.
+func WithRateLimitStoreOptions(opts ...RateLimitStoreOption) AdapterOption {
+	return func(c *adapterConfig) {
+		c.rateLimitStoreOpts = append(c.rateLimitStoreOpts, opts...)
+	}
+}
+
 // KagiAdapter bundles generated store pointers backed by an Ent client.
 type KagiAdapter struct {
 	client       *Client
@@ -17,14 +64,19 @@ type KagiAdapter struct {
 }
 
 // NewKagiAdapter initializes and returns a KagiAdapter with all available stores.
-func NewKagiAdapter(client *Client) *KagiAdapter {
+func NewKagiAdapter(client *Client, opts ...AdapterOption) *KagiAdapter {
+	var cfg adapterConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	return &KagiAdapter{
 		client:       client,
-		User:         NewKagiUserStore(client),
-		Account:      NewKagiAccountStore(client),
-		Session:      NewKagiSessionStore(client),
-		Verification: NewKagiVerificationStore(client),
-		RateLimit:    NewKagiRateLimitStore(client),
+		User:         NewKagiUserStore(client, cfg.userStoreOpts...),
+		Account:      NewKagiAccountStore(client, cfg.accountStoreOpts...),
+		Session:      NewKagiSessionStore(client, cfg.sessionStoreOpts...),
+		Verification: NewKagiVerificationStore(client, cfg.verificationStoreOpts...),
+		RateLimit:    NewKagiRateLimitStore(client, cfg.rateLimitStoreOpts...),
 	}
 }
 

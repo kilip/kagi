@@ -96,6 +96,34 @@ func (uc *UserCreate) SetNillableUpdatedAt(t *time.Time) *UserCreate {
 	return uc
 }
 
+// SetTenantID sets the "tenant_id" field.
+func (uc *UserCreate) SetTenantID(s string) *UserCreate {
+	uc.mutation.SetTenantID(s)
+	return uc
+}
+
+// SetNillableTenantID sets the "tenant_id" field if the given value is not nil.
+func (uc *UserCreate) SetNillableTenantID(s *string) *UserCreate {
+	if s != nil {
+		uc.SetTenantID(*s)
+	}
+	return uc
+}
+
+// SetAvatarURL sets the "avatar_url" field.
+func (uc *UserCreate) SetAvatarURL(s string) *UserCreate {
+	uc.mutation.SetAvatarURL(s)
+	return uc
+}
+
+// SetNillableAvatarURL sets the "avatar_url" field if the given value is not nil.
+func (uc *UserCreate) SetNillableAvatarURL(s *string) *UserCreate {
+	if s != nil {
+		uc.SetAvatarURL(*s)
+	}
+	return uc
+}
+
 // Mutation returns the UserMutation object of the builder.
 func (uc *UserCreate) Mutation() *UserMutation {
 	return uc.mutation
@@ -150,6 +178,10 @@ func (uc *UserCreate) defaults() {
 	if _, ok := uc.mutation.UpdatedAt(); !ok {
 		v := user.DefaultUpdatedAt()
 		uc.mutation.SetUpdatedAt(v)
+	}
+	if _, ok := uc.mutation.AvatarURL(); !ok {
+		v := user.DefaultAvatarURL
+		uc.mutation.SetAvatarURL(v)
 	}
 }
 
@@ -227,6 +259,14 @@ func (uc *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 	if value, ok := uc.mutation.UpdatedAt(); ok {
 		_spec.SetField(user.FieldUpdatedAt, field.TypeTime, value)
 		_node.UpdatedAt = value
+	}
+	if value, ok := uc.mutation.TenantID(); ok {
+		_spec.SetField(user.FieldTenantID, field.TypeString, value)
+		_node.TenantID = value
+	}
+	if value, ok := uc.mutation.AvatarURL(); ok {
+		_spec.SetField(user.FieldAvatarURL, field.TypeString, value)
+		_node.AvatarURL = value
 	}
 	return _node, _spec
 }

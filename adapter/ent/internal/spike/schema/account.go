@@ -2,6 +2,7 @@ package schema
 
 import (
 	"entgo.io/ent"
+	"entgo.io/ent/schema/field"
 	"github.com/kilip/kagi/adapter/ent/mixin"
 )
 
@@ -14,5 +15,13 @@ type Account struct {
 func (Account) Mixin() []ent.Mixin {
 	return []ent.Mixin{
 		mixin.AccountMixin{},
+	}
+}
+
+// Fields returns Account fields.
+func (Account) Fields() []ent.Field {
+	return []ent.Field{
+		field.String("metadata").
+			Optional(),
 	}
 }

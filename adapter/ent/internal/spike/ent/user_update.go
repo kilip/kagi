@@ -90,6 +90,46 @@ func (uu *UserUpdate) SetUpdatedAt(t time.Time) *UserUpdate {
 	return uu
 }
 
+// SetTenantID sets the "tenant_id" field.
+func (uu *UserUpdate) SetTenantID(s string) *UserUpdate {
+	uu.mutation.SetTenantID(s)
+	return uu
+}
+
+// SetNillableTenantID sets the "tenant_id" field if the given value is not nil.
+func (uu *UserUpdate) SetNillableTenantID(s *string) *UserUpdate {
+	if s != nil {
+		uu.SetTenantID(*s)
+	}
+	return uu
+}
+
+// ClearTenantID clears the value of the "tenant_id" field.
+func (uu *UserUpdate) ClearTenantID() *UserUpdate {
+	uu.mutation.ClearTenantID()
+	return uu
+}
+
+// SetAvatarURL sets the "avatar_url" field.
+func (uu *UserUpdate) SetAvatarURL(s string) *UserUpdate {
+	uu.mutation.SetAvatarURL(s)
+	return uu
+}
+
+// SetNillableAvatarURL sets the "avatar_url" field if the given value is not nil.
+func (uu *UserUpdate) SetNillableAvatarURL(s *string) *UserUpdate {
+	if s != nil {
+		uu.SetAvatarURL(*s)
+	}
+	return uu
+}
+
+// ClearAvatarURL clears the value of the "avatar_url" field.
+func (uu *UserUpdate) ClearAvatarURL() *UserUpdate {
+	uu.mutation.ClearAvatarURL()
+	return uu
+}
+
 // Mutation returns the UserMutation object of the builder.
 func (uu *UserUpdate) Mutation() *UserMutation {
 	return uu.mutation
@@ -167,6 +207,18 @@ func (uu *UserUpdate) sqlSave(ctx context.Context) (n int, err error) {
 	}
 	if value, ok := uu.mutation.UpdatedAt(); ok {
 		_spec.SetField(user.FieldUpdatedAt, field.TypeTime, value)
+	}
+	if value, ok := uu.mutation.TenantID(); ok {
+		_spec.SetField(user.FieldTenantID, field.TypeString, value)
+	}
+	if uu.mutation.TenantIDCleared() {
+		_spec.ClearField(user.FieldTenantID, field.TypeString)
+	}
+	if value, ok := uu.mutation.AvatarURL(); ok {
+		_spec.SetField(user.FieldAvatarURL, field.TypeString, value)
+	}
+	if uu.mutation.AvatarURLCleared() {
+		_spec.ClearField(user.FieldAvatarURL, field.TypeString)
 	}
 	if n, err = sqlgraph.UpdateNodes(ctx, uu.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -247,6 +299,46 @@ func (uuo *UserUpdateOne) SetNillableTwoFactorEnabled(b *bool) *UserUpdateOne {
 // SetUpdatedAt sets the "updated_at" field.
 func (uuo *UserUpdateOne) SetUpdatedAt(t time.Time) *UserUpdateOne {
 	uuo.mutation.SetUpdatedAt(t)
+	return uuo
+}
+
+// SetTenantID sets the "tenant_id" field.
+func (uuo *UserUpdateOne) SetTenantID(s string) *UserUpdateOne {
+	uuo.mutation.SetTenantID(s)
+	return uuo
+}
+
+// SetNillableTenantID sets the "tenant_id" field if the given value is not nil.
+func (uuo *UserUpdateOne) SetNillableTenantID(s *string) *UserUpdateOne {
+	if s != nil {
+		uuo.SetTenantID(*s)
+	}
+	return uuo
+}
+
+// ClearTenantID clears the value of the "tenant_id" field.
+func (uuo *UserUpdateOne) ClearTenantID() *UserUpdateOne {
+	uuo.mutation.ClearTenantID()
+	return uuo
+}
+
+// SetAvatarURL sets the "avatar_url" field.
+func (uuo *UserUpdateOne) SetAvatarURL(s string) *UserUpdateOne {
+	uuo.mutation.SetAvatarURL(s)
+	return uuo
+}
+
+// SetNillableAvatarURL sets the "avatar_url" field if the given value is not nil.
+func (uuo *UserUpdateOne) SetNillableAvatarURL(s *string) *UserUpdateOne {
+	if s != nil {
+		uuo.SetAvatarURL(*s)
+	}
+	return uuo
+}
+
+// ClearAvatarURL clears the value of the "avatar_url" field.
+func (uuo *UserUpdateOne) ClearAvatarURL() *UserUpdateOne {
+	uuo.mutation.ClearAvatarURL()
 	return uuo
 }
 
@@ -357,6 +449,18 @@ func (uuo *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) 
 	}
 	if value, ok := uuo.mutation.UpdatedAt(); ok {
 		_spec.SetField(user.FieldUpdatedAt, field.TypeTime, value)
+	}
+	if value, ok := uuo.mutation.TenantID(); ok {
+		_spec.SetField(user.FieldTenantID, field.TypeString, value)
+	}
+	if uuo.mutation.TenantIDCleared() {
+		_spec.ClearField(user.FieldTenantID, field.TypeString)
+	}
+	if value, ok := uuo.mutation.AvatarURL(); ok {
+		_spec.SetField(user.FieldAvatarURL, field.TypeString, value)
+	}
+	if uuo.mutation.AvatarURLCleared() {
+		_spec.ClearField(user.FieldAvatarURL, field.TypeString)
 	}
 	_node = &User{config: uuo.config}
 	_spec.Assign = _node.assignValues

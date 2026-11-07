@@ -34,7 +34,9 @@ type Account struct {
 	// CreatedAt holds the value of the "created_at" field.
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	// UpdatedAt holds the value of the "updated_at" field.
-	UpdatedAt    time.Time `json:"updated_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	// Metadata holds the value of the "metadata" field.
+	Metadata     string `json:"metadata,omitempty"`
 	selectValues sql.SelectValues
 }
 
@@ -45,7 +47,7 @@ func (*Account) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case account.FieldID:
 			values[i] = new(sql.NullInt64)
-		case account.FieldUserID, account.FieldProvider, account.FieldProviderAccountID, account.FieldPasswordHash, account.FieldAccessToken, account.FieldRefreshToken:
+		case account.FieldUserID, account.FieldProvider, account.FieldProviderAccountID, account.FieldPasswordHash, account.FieldAccessToken, account.FieldRefreshToken, account.FieldMetadata:
 			values[i] = new(sql.NullString)
 		case account.FieldTokenExpiresAt, account.FieldCreatedAt, account.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -125,6 +127,12 @@ func (a *Account) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				a.UpdatedAt = value.Time
 			}
+		case account.FieldMetadata:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field metadata", values[i])
+			} else if value.Valid {
+				a.Metadata = value.String
+			}
 		default:
 			a.selectValues.Set(columns[i], values[i])
 		}
@@ -189,6 +197,9 @@ func (a *Account) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("updated_at=")
 	builder.WriteString(a.UpdatedAt.Format(time.ANSIC))
+	builder.WriteString(", ")
+	builder.WriteString("metadata=")
+	builder.WriteString(a.Metadata)
 	builder.WriteByte(')')
 	return builder.String()
 }

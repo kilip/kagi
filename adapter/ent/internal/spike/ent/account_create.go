@@ -122,6 +122,20 @@ func (ac *AccountCreate) SetNillableUpdatedAt(t *time.Time) *AccountCreate {
 	return ac
 }
 
+// SetMetadata sets the "metadata" field.
+func (ac *AccountCreate) SetMetadata(s string) *AccountCreate {
+	ac.mutation.SetMetadata(s)
+	return ac
+}
+
+// SetNillableMetadata sets the "metadata" field if the given value is not nil.
+func (ac *AccountCreate) SetNillableMetadata(s *string) *AccountCreate {
+	if s != nil {
+		ac.SetMetadata(*s)
+	}
+	return ac
+}
+
 // Mutation returns the AccountMutation object of the builder.
 func (ac *AccountCreate) Mutation() *AccountMutation {
 	return ac.mutation
@@ -272,6 +286,10 @@ func (ac *AccountCreate) createSpec() (*Account, *sqlgraph.CreateSpec) {
 	if value, ok := ac.mutation.UpdatedAt(); ok {
 		_spec.SetField(account.FieldUpdatedAt, field.TypeTime, value)
 		_node.UpdatedAt = value
+	}
+	if value, ok := ac.mutation.Metadata(); ok {
+		_spec.SetField(account.FieldMetadata, field.TypeString, value)
+		_node.Metadata = value
 	}
 	return _node, _spec
 }

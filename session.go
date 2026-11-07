@@ -3,6 +3,9 @@ package kagi
 import (
 	"context"
 	"time"
+
+	"github.com/kilip/kagi/internal/clock"
+	"github.com/kilip/kagi/internal/crypto"
 )
 
 // Session represents an active opaque session in Kagi (ADR-0004, ADR-0014).
@@ -65,7 +68,76 @@ func DefaultSessionConfig() SessionConfig {
 
 // SessionService manages session lifecycles, validation, rotation, and revocation.
 type SessionService struct {
-	// unexported fields
+	store     SessionStore
+	secondary SecondaryStorage
+	config    SessionConfig
+	clock     clock.Clock
+}
+
+// NewSessionService initializes and returns a new SessionService.
+// If config.IdleTimeout is 0, safe defaults from DefaultSessionConfig() are used.
+// If clk is nil, clock.RealClock{} is used.
+func NewSessionService(store SessionStore, secondary SecondaryStorage, config SessionConfig, clk clock.Clock) *SessionService {
+	if config.IdleTimeout == 0 {
+		config = DefaultSessionConfig()
+	}
+	if clk == nil {
+		clk = clock.RealClock{}
+	}
+	return &SessionService{
+		store:     store,
+		secondary: secondary,
+		config:    config,
+		clock:     clk,
+	}
+}
+
+func (s *SessionService) createSession(ctx context.Context, userID string, pending2FA bool, ip, userAgent string) (*Session, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+
+	rawToken, err := crypto.GenerateSessionToken()
+	if err != nil {
+		return nil, "", err
+	}
+	tokenHash := crypto.HashToken(rawToken)
+
+	now := s.clock.Now().UTC()
+	var expiresAt time.Time
+	if pending2FA {
+		expiresAt = now.Add(s.config.Pending2FATimeout)
+	} else {
+		expiresAt = now.Add(s.config.IdleTimeout)
+		absMax := now.Add(s.config.AbsoluteTimeout)
+		if expiresAt.After(absMax) {
+			expiresAt = absMax
+		}
+	}
+
+	session := &Session{
+		UserID:     userID,
+		TokenHash:  tokenHash,
+		ExpiresAt:  expiresAt,
+		IPAddress:  ip,
+		UserAgent:  userAgent,
+		Pending2FA: pending2FA,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+
+	if err := s.store.Create(ctx, session); err != nil {
+		return nil, "", err
+	}
+
+	if !pending2FA && s.secondary != nil {
+		ttl := session.ExpiresAt.Sub(now)
+		if err := s.secondary.SetSession(ctx, session, ttl); err != nil {
+			return nil, "", err
+		}
+	}
+
+	return session, rawToken, nil
 }
 
 // Validate checks the session token, verifies constant-time hash, executes sliding renewal
@@ -81,6 +153,25 @@ func (s *SessionService) Rotate(ctx context.Context, rawToken string) (string, *
 
 // SignOut revokes the session matching rawToken and evicts it from SecondaryStorage.
 func (s *SessionService) SignOut(ctx context.Context, rawToken string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if err := crypto.ValidateSessionTokenFormat(rawToken); err != nil {
+		return ErrInvalidSessionToken
+	}
+
+	tokenHash := crypto.HashToken(rawToken)
+	if err := s.store.DeleteByTokenHash(ctx, tokenHash); err != nil {
+		return err
+	}
+
+	if s.secondary != nil {
+		if err := s.secondary.DeleteSession(ctx, tokenHash); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

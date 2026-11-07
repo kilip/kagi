@@ -8,6 +8,67 @@ import (
 )
 
 var (
+	// AccountsColumns holds the columns for the "accounts" table.
+	AccountsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt, Increment: true},
+		{Name: "user_id", Type: field.TypeString},
+		{Name: "provider", Type: field.TypeString},
+		{Name: "provider_account_id", Type: field.TypeString},
+		{Name: "password_hash", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "access_token", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "refresh_token", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "token_expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// AccountsTable holds the schema information for the "accounts" table.
+	AccountsTable = &schema.Table{
+		Name:       "accounts",
+		Columns:    AccountsColumns,
+		PrimaryKey: []*schema.Column{AccountsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "account_provider_provider_account_id",
+				Unique:  true,
+				Columns: []*schema.Column{AccountsColumns[2], AccountsColumns[3]},
+			},
+			{
+				Name:    "account_user_id",
+				Unique:  false,
+				Columns: []*schema.Column{AccountsColumns[1]},
+			},
+		},
+	}
+	// SessionsColumns holds the columns for the "sessions" table.
+	SessionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt, Increment: true},
+		{Name: "user_id", Type: field.TypeString},
+		{Name: "token_hash", Type: field.TypeString, Unique: true},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "ip_address", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "user_agent", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "pending_2fa", Type: field.TypeBool, Default: false},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// SessionsTable holds the schema information for the "sessions" table.
+	SessionsTable = &schema.Table{
+		Name:       "sessions",
+		Columns:    SessionsColumns,
+		PrimaryKey: []*schema.Column{SessionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "session_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{SessionsColumns[3]},
+			},
+			{
+				Name:    "session_user_id",
+				Unique:  false,
+				Columns: []*schema.Column{SessionsColumns[1]},
+			},
+		},
+	}
 	// UsersColumns holds the columns for the "users" table.
 	UsersColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt, Increment: true},
@@ -26,6 +87,8 @@ var (
 	}
 	// Tables holds all the tables in the schema.
 	Tables = []*schema.Table{
+		AccountsTable,
+		SessionsTable,
 		UsersTable,
 	}
 )

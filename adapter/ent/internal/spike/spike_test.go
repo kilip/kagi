@@ -52,14 +52,34 @@ func TestEntcGeneration(t *testing.T) {
 		t.Fatalf("failed running entc.Generate with Kagi extension: %v", err)
 	}
 
-	generatedFile := filepath.Join(tempTarget, "kagi_user_store.go")
-	info, err := os.Stat(generatedFile)
-	if err != nil {
-		t.Fatalf("expected %s to be generated, got error: %v", generatedFile, err)
+	for _, name := range []string{"kagi_user_store.go", "kagi_account_store.go", "kagi_session_store.go"} {
+		generatedFile := filepath.Join(tempTarget, name)
+		info, err := os.Stat(generatedFile)
+		if err != nil {
+			t.Fatalf("expected %s to be generated, got error: %v", generatedFile, err)
+		}
+		if info.Size() == 0 {
+			t.Fatalf("expected %s to be non-empty", generatedFile)
+		}
 	}
-	if info.Size() == 0 {
-		t.Fatalf("expected %s to be non-empty", generatedFile)
-	}
+}
+
+func TestKagiAccountStore_Conformance(t *testing.T) {
+	var _ kagi.AccountStore = (*ent.KagiAccountStore)(nil)
+
+	client := setupTestClient(t)
+	accountStore := ent.NewKagiAccountStore(client)
+	userStore := ent.NewKagiUserStore(client)
+	adaptertest.RunAccountStoreTests(t, accountStore, userStore)
+}
+
+func TestKagiSessionStore_Conformance(t *testing.T) {
+	var _ kagi.SessionStore = (*ent.KagiSessionStore)(nil)
+
+	client := setupTestClient(t)
+	sessionStore := ent.NewKagiSessionStore(client)
+	userStore := ent.NewKagiUserStore(client)
+	adaptertest.RunSessionStoreTests(t, sessionStore, userStore)
 }
 
 func TestKagiUserStore_Conformance(t *testing.T) {

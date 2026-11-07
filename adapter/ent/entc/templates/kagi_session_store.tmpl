@@ -1,0 +1,449 @@
+{{/* gotype: entgo.io/ent/entc/gen.Graph */}}
+
+{{ define "kagi_session_store" }}
+
+{{ $pkg := base $.Config.Package }}
+{{ template "header" $ }}
+
+{{/* Find the node that represents the Kagi Session */}}
+{{ $sessionNode := "" }}
+{{ range $n := $.Nodes }}
+	{{ if or (hasKey $n.Annotations "KagiSession") (eq $n.Name "Session") }}
+		{{ $sessionNode = $n }}
+	{{ end }}
+{{ end }}
+
+{{ if $sessionNode }}
+import (
+	"context"
+	"time"
+	{{- if or $sessionNode.ID.IsInt $sessionNode.ID.IsInt64 }}
+	"strconv"
+	{{- end }}
+	{{- if $sessionNode.ID.IsUUID }}
+	"github.com/google/uuid"
+	{{- end }}
+
+	"github.com/kilip/kagi"
+	{{ $sessionNode.Package }} "{{ $sessionNode.Config.Package }}/{{ $sessionNode.PackageDir }}"
+)
+
+// KagiSessionStore implements kagi.SessionStore using the ent client.
+type KagiSessionStore struct {
+	client *Client
+}
+
+// NewKagiSessionStore creates a new kagi.SessionStore backed by ent.
+func NewKagiSessionStore(client *Client) *KagiSessionStore {
+	return &KagiSessionStore{client: client}
+}
+
+var _ kagi.SessionStore = (*KagiSessionStore)(nil)
+
+// Create inserts a new session into the database.
+func (s *KagiSessionStore) Create(ctx context.Context, sess *kagi.Session) error {
+	builder := s.client.{{ $sessionNode.Name }}.Create().
+		SetUserID(sess.UserID).
+		SetTokenHash(sess.TokenHash).
+		SetExpiresAt(sess.ExpiresAt).
+		SetIPAddress(sess.IPAddress).
+		SetUserAgent(sess.UserAgent).
+		SetPending2fa(sess.Pending2FA)
+
+	if !sess.CreatedAt.IsZero() {
+		builder.SetCreatedAt(sess.CreatedAt)
+	}
+	if !sess.UpdatedAt.IsZero() {
+		builder.SetUpdatedAt(sess.UpdatedAt)
+	}
+
+	created, err := builder.Save(ctx)
+	if err != nil {
+		return err
+	}
+
+	sess.CreatedAt = created.CreatedAt
+	sess.UpdatedAt = created.UpdatedAt
+
+	{{ if $sessionNode.ID.IsInt -}}
+	sess.ID = strconv.Itoa(created.ID)
+	{{- else if $sessionNode.ID.IsInt64 -}}
+	sess.ID = strconv.FormatInt(created.ID, 10)
+	{{- else if $sessionNode.ID.IsString -}}
+	sess.ID = created.ID
+	{{- else if $sessionNode.ID.IsUUID -}}
+	sess.ID = created.ID.String()
+	{{- else -}}
+	sess.ID = strconv.Itoa(created.ID)
+	{{- end }}
+	return nil
+}
+
+// GetByTokenHash retrieves an active session by token hash (expires_at > now).
+func (s *KagiSessionStore) GetByTokenHash(ctx context.Context, tokenHash string) (*kagi.Session, error) {
+	now := time.Now().UTC()
+	entity, err := s.client.{{ $sessionNode.Name }}.Query().
+		Where(
+			{{ $sessionNode.Package }}.TokenHashEQ(tokenHash),
+			{{ $sessionNode.Package }}.ExpiresAtGT(now),
+		).
+		Only(ctx)
+	if err != nil {
+		if IsNotFound(err) {
+			return nil, kagi.ErrSessionNotFound
+		}
+		return nil, err
+	}
+
+	return s.toKagiSession(entity), nil
+}
+
+// Update updates mutable fields of an active, unexpired session (expires_at > now).
+func (s *KagiSessionStore) Update(ctx context.Context, sess *kagi.Session) error {
+	{{ if $sessionNode.ID.IsInt -}}
+	parsedID, err := strconv.Atoi(sess.ID)
+	if err != nil {
+		return kagi.ErrSessionNotFound
+	}
+	{{- else if $sessionNode.ID.IsInt64 -}}
+	parsedID, err := strconv.ParseInt(sess.ID, 10, 64)
+	if err != nil {
+		return kagi.ErrSessionNotFound
+	}
+	{{- else if $sessionNode.ID.IsUUID -}}
+	parsedID, err := uuid.Parse(sess.ID)
+	if err != nil {
+		return kagi.ErrSessionNotFound
+	}
+	{{- else -}}
+	parsedID := sess.ID
+	{{- end }}
+
+	now := time.Now().UTC()
+	builder := s.client.{{ $sessionNode.Name }}.Update().
+		Where(
+			{{ $sessionNode.Package }}.IDEQ(parsedID),
+			{{ $sessionNode.Package }}.ExpiresAtGT(now),
+		).
+		SetExpiresAt(sess.ExpiresAt).
+		SetIPAddress(sess.IPAddress).
+		SetUserAgent(sess.UserAgent)
+
+	if !sess.UpdatedAt.IsZero() {
+		builder.SetUpdatedAt(sess.UpdatedAt)
+	}
+
+	affected, err := builder.Save(ctx)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return kagi.ErrSessionNotFound
+	}
+
+	return nil
+}
+
+// UpdateTokenHash performs an atomic Compare-And-Swap (CAS) update of the session's token hash.
+func (s *KagiSessionStore) UpdateTokenHash(ctx context.Context, id, oldTokenHash, newTokenHash string, expiresAt time.Time) error {
+	{{ if $sessionNode.ID.IsInt -}}
+	parsedID, err := strconv.Atoi(id)
+	if err != nil {
+		return kagi.ErrSessionNotFound
+	}
+	{{- else if $sessionNode.ID.IsInt64 -}}
+	parsedID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return kagi.ErrSessionNotFound
+	}
+	{{- else if $sessionNode.ID.IsUUID -}}
+	parsedID, err := uuid.Parse(id)
+	if err != nil {
+		return kagi.ErrSessionNotFound
+	}
+	{{- else -}}
+	parsedID := id
+	{{- end }}
+
+	now := time.Now().UTC()
+	affected, err := s.client.{{ $sessionNode.Name }}.Update().
+		Where(
+			{{ $sessionNode.Package }}.IDEQ(parsedID),
+			{{ $sessionNode.Package }}.TokenHashEQ(oldTokenHash),
+			{{ $sessionNode.Package }}.ExpiresAtGT(now),
+		).
+		SetTokenHash(newTokenHash).
+		SetExpiresAt(expiresAt).
+		SetPending2fa(false).
+		SetUpdatedAt(now).
+		Save(ctx)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return kagi.ErrSessionNotFound
+	}
+
+	return nil
+}
+
+// DeleteByID deletes an active session identified by ID and returns its token_hash.
+func (s *KagiSessionStore) DeleteByID(ctx context.Context, id string) (string, error) {
+	{{ if $sessionNode.ID.IsInt -}}
+	parsedID, err := strconv.Atoi(id)
+	if err != nil {
+		return "", kagi.ErrSessionNotFound
+	}
+	{{- else if $sessionNode.ID.IsInt64 -}}
+	parsedID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return "", kagi.ErrSessionNotFound
+	}
+	{{- else if $sessionNode.ID.IsUUID -}}
+	parsedID, err := uuid.Parse(id)
+	if err != nil {
+		return "", kagi.ErrSessionNotFound
+	}
+	{{- else -}}
+	parsedID := id
+	{{- end }}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	now := time.Now().UTC()
+	entity, err := tx.{{ $sessionNode.Name }}.Query().
+		Where(
+			{{ $sessionNode.Package }}.IDEQ(parsedID),
+			{{ $sessionNode.Package }}.ExpiresAtGT(now),
+		).
+		Only(ctx)
+	if err != nil {
+		if IsNotFound(err) {
+			return "", kagi.ErrSessionNotFound
+		}
+		return "", err
+	}
+
+	err = tx.{{ $sessionNode.Name }}.DeleteOneID(parsedID).Exec(ctx)
+	if err != nil {
+		if IsNotFound(err) {
+			return "", kagi.ErrSessionNotFound
+		}
+		return "", err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+
+	return entity.TokenHash, nil
+}
+
+// DeleteByTokenHash deletes an active session matching token hash.
+func (s *KagiSessionStore) DeleteByTokenHash(ctx context.Context, tokenHash string) error {
+	now := time.Now().UTC()
+	affected, err := s.client.{{ $sessionNode.Name }}.Delete().
+		Where(
+			{{ $sessionNode.Package }}.TokenHashEQ(tokenHash),
+			{{ $sessionNode.Package }}.ExpiresAtGT(now),
+		).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return kagi.ErrSessionNotFound
+	}
+
+	return nil
+}
+
+// DeleteByUserID revokes all sessions belonging to userID and returns deleted token hashes.
+func (s *KagiSessionStore) DeleteByUserID(ctx context.Context, userID string) ([]string, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	entities, err := tx.{{ $sessionNode.Name }}.Query().
+		Where({{ $sessionNode.Package }}.UserIDEQ(userID)).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(entities) == 0 {
+		return nil, nil
+	}
+
+	deletedHashes := make([]string, len(entities))
+	ids := make([]{{ if $sessionNode.ID.IsInt }}int{{ else if $sessionNode.ID.IsInt64 }}int64{{ else if $sessionNode.ID.IsUUID }}uuid.UUID{{ else }}string{{ end }}, len(entities))
+	for i, entity := range entities {
+		deletedHashes[i] = entity.TokenHash
+		ids[i] = entity.ID
+	}
+
+	_, err = tx.{{ $sessionNode.Name }}.Delete().
+		Where({{ $sessionNode.Package }}.IDIn(ids...)).
+		Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return deletedHashes, nil
+}
+
+// DeleteOthersByUserID revokes all sessions belonging to userID except currentSessionID.
+func (s *KagiSessionStore) DeleteOthersByUserID(ctx context.Context, userID, currentSessionID string) ([]string, error) {
+	{{ if $sessionNode.ID.IsInt -}}
+	parsedCurrentID, err := strconv.Atoi(currentSessionID)
+	if err != nil {
+		return nil, err
+	}
+	{{- else if $sessionNode.ID.IsInt64 -}}
+	parsedCurrentID, err := strconv.ParseInt(currentSessionID, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	{{- else if $sessionNode.ID.IsUUID -}}
+	parsedCurrentID, err := uuid.Parse(currentSessionID)
+	if err != nil {
+		return nil, err
+	}
+	{{- else -}}
+	parsedCurrentID := currentSessionID
+	{{- end }}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	entities, err := tx.{{ $sessionNode.Name }}.Query().
+		Where(
+			{{ $sessionNode.Package }}.UserIDEQ(userID),
+			{{ $sessionNode.Package }}.IDNEQ(parsedCurrentID),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(entities) == 0 {
+		return nil, nil
+	}
+
+	deletedHashes := make([]string, len(entities))
+	ids := make([]{{ if $sessionNode.ID.IsInt }}int{{ else if $sessionNode.ID.IsInt64 }}int64{{ else if $sessionNode.ID.IsUUID }}uuid.UUID{{ else }}string{{ end }}, len(entities))
+	for i, entity := range entities {
+		deletedHashes[i] = entity.TokenHash
+		ids[i] = entity.ID
+	}
+
+	_, err = tx.{{ $sessionNode.Name }}.Delete().
+		Where({{ $sessionNode.Package }}.IDIn(ids...)).
+		Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return deletedHashes, nil
+}
+
+// ListByUserID retrieves all active, unexpired, non-pending sessions for userID.
+func (s *KagiSessionStore) ListByUserID(ctx context.Context, userID string) ([]*kagi.Session, error) {
+	now := time.Now().UTC()
+	entities, err := s.client.{{ $sessionNode.Name }}.Query().
+		Where(
+			{{ $sessionNode.Package }}.UserIDEQ(userID),
+			{{ $sessionNode.Package }}.ExpiresAtGT(now),
+			{{ $sessionNode.Package }}.Pending2faEQ(false),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	sessions := make([]*kagi.Session, len(entities))
+	for i, entity := range entities {
+		sessions[i] = s.toKagiSession(entity)
+	}
+	return sessions, nil
+}
+
+// DeleteExpired removes expired sessions from storage in bounded batches up to batchSize.
+func (s *KagiSessionStore) DeleteExpired(ctx context.Context, batchSize int) (int, error) {
+	if batchSize <= 0 {
+		return 0, nil
+	}
+
+	now := time.Now().UTC()
+	expiredEntities, err := s.client.{{ $sessionNode.Name }}.Query().
+		Where({{ $sessionNode.Package }}.ExpiresAtLTE(now)).
+		Limit(batchSize).
+		All(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if len(expiredEntities) == 0 {
+		return 0, nil
+	}
+
+	ids := make([]{{ if $sessionNode.ID.IsInt }}int{{ else if $sessionNode.ID.IsInt64 }}int64{{ else if $sessionNode.ID.IsUUID }}uuid.UUID{{ else }}string{{ end }}, len(expiredEntities))
+	for i, entity := range expiredEntities {
+		ids[i] = entity.ID
+	}
+
+	affected, err := s.client.{{ $sessionNode.Name }}.Delete().
+		Where({{ $sessionNode.Package }}.IDIn(ids...)).
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	return affected, nil
+}
+
+func (s *KagiSessionStore) toKagiSession(entity *{{ $sessionNode.Name }}) *kagi.Session {
+	return &kagi.Session{
+		{{ if $sessionNode.ID.IsInt -}}
+		ID: strconv.Itoa(entity.ID),
+		{{- else if $sessionNode.ID.IsInt64 -}}
+		ID: strconv.FormatInt(entity.ID, 10),
+		{{- else if $sessionNode.ID.IsString -}}
+		ID: entity.ID,
+		{{- else if $sessionNode.ID.IsUUID -}}
+		ID: entity.ID.String(),
+		{{- else -}}
+		ID: strconv.Itoa(entity.ID),
+		{{- end }}
+		UserID:     entity.UserID,
+		TokenHash:  entity.TokenHash,
+		ExpiresAt:  entity.ExpiresAt,
+		IPAddress:  entity.IPAddress,
+		UserAgent:  entity.UserAgent,
+		Pending2FA: entity.Pending2fa,
+		CreatedAt:  entity.CreatedAt,
+		UpdatedAt:  entity.UpdatedAt,
+	}
+}
+{{ end }}
+{{ end }}

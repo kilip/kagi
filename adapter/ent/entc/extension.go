@@ -29,7 +29,11 @@ func NewExtension(opts ...Option) *Extension {
 
 // Templates returns the templates provided by the extension.
 func (e *Extension) Templates() []*gen.Template {
-	tmpl := gen.MustParse(gen.NewTemplate("kagi_user_store").
+	userTmpl := gen.MustParse(gen.NewTemplate("kagi_user_store").
 		ParseFS(templateFS, "templates/kagi_user_store.tmpl"))
-	return []*gen.Template{tmpl}
+	accountTmpl := gen.MustParse(gen.NewTemplate("kagi_account_store").
+		ParseFS(templateFS, "templates/kagi_account_store.tmpl"))
+	sessionTmpl := gen.MustParse(gen.NewTemplate("kagi_session_store").
+		ParseFS(templateFS, "templates/kagi_session_store.tmpl"))
+	return []*gen.Template{userTmpl, accountTmpl, sessionTmpl}
 }

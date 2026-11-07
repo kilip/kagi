@@ -5,6 +5,8 @@ package ent
 import (
 	"time"
 
+	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/account"
+	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/session"
 	"github.com/kilip/kagi/adapter/ent/internal/spike/ent/user"
 	"github.com/kilip/kagi/adapter/ent/internal/spike/schema"
 )
@@ -13,6 +15,80 @@ import (
 // (default values, validators, hooks and policies) and stitches it
 // to their package variables.
 func init() {
+	accountMixin := schema.Account{}.Mixin()
+	accountMixinFields0 := accountMixin[0].Fields()
+	_ = accountMixinFields0
+	accountFields := schema.Account{}.Fields()
+	_ = accountFields
+	// accountDescUserID is the schema descriptor for user_id field.
+	accountDescUserID := accountMixinFields0[0].Descriptor()
+	// account.UserIDValidator is a validator for the "user_id" field. It is called by the builders before save.
+	account.UserIDValidator = accountDescUserID.Validators[0].(func(string) error)
+	// accountDescProvider is the schema descriptor for provider field.
+	accountDescProvider := accountMixinFields0[1].Descriptor()
+	// account.ProviderValidator is a validator for the "provider" field. It is called by the builders before save.
+	account.ProviderValidator = accountDescProvider.Validators[0].(func(string) error)
+	// accountDescProviderAccountID is the schema descriptor for provider_account_id field.
+	accountDescProviderAccountID := accountMixinFields0[2].Descriptor()
+	// account.ProviderAccountIDValidator is a validator for the "provider_account_id" field. It is called by the builders before save.
+	account.ProviderAccountIDValidator = accountDescProviderAccountID.Validators[0].(func(string) error)
+	// accountDescPasswordHash is the schema descriptor for password_hash field.
+	accountDescPasswordHash := accountMixinFields0[3].Descriptor()
+	// account.DefaultPasswordHash holds the default value on creation for the password_hash field.
+	account.DefaultPasswordHash = accountDescPasswordHash.Default.(string)
+	// accountDescAccessToken is the schema descriptor for access_token field.
+	accountDescAccessToken := accountMixinFields0[4].Descriptor()
+	// account.DefaultAccessToken holds the default value on creation for the access_token field.
+	account.DefaultAccessToken = accountDescAccessToken.Default.(string)
+	// accountDescRefreshToken is the schema descriptor for refresh_token field.
+	accountDescRefreshToken := accountMixinFields0[5].Descriptor()
+	// account.DefaultRefreshToken holds the default value on creation for the refresh_token field.
+	account.DefaultRefreshToken = accountDescRefreshToken.Default.(string)
+	// accountDescCreatedAt is the schema descriptor for created_at field.
+	accountDescCreatedAt := accountMixinFields0[7].Descriptor()
+	// account.DefaultCreatedAt holds the default value on creation for the created_at field.
+	account.DefaultCreatedAt = accountDescCreatedAt.Default.(func() time.Time)
+	// accountDescUpdatedAt is the schema descriptor for updated_at field.
+	accountDescUpdatedAt := accountMixinFields0[8].Descriptor()
+	// account.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	account.DefaultUpdatedAt = accountDescUpdatedAt.Default.(func() time.Time)
+	// account.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	account.UpdateDefaultUpdatedAt = accountDescUpdatedAt.UpdateDefault.(func() time.Time)
+	sessionMixin := schema.Session{}.Mixin()
+	sessionMixinFields0 := sessionMixin[0].Fields()
+	_ = sessionMixinFields0
+	sessionFields := schema.Session{}.Fields()
+	_ = sessionFields
+	// sessionDescUserID is the schema descriptor for user_id field.
+	sessionDescUserID := sessionMixinFields0[0].Descriptor()
+	// session.UserIDValidator is a validator for the "user_id" field. It is called by the builders before save.
+	session.UserIDValidator = sessionDescUserID.Validators[0].(func(string) error)
+	// sessionDescTokenHash is the schema descriptor for token_hash field.
+	sessionDescTokenHash := sessionMixinFields0[1].Descriptor()
+	// session.TokenHashValidator is a validator for the "token_hash" field. It is called by the builders before save.
+	session.TokenHashValidator = sessionDescTokenHash.Validators[0].(func(string) error)
+	// sessionDescIPAddress is the schema descriptor for ip_address field.
+	sessionDescIPAddress := sessionMixinFields0[3].Descriptor()
+	// session.DefaultIPAddress holds the default value on creation for the ip_address field.
+	session.DefaultIPAddress = sessionDescIPAddress.Default.(string)
+	// sessionDescUserAgent is the schema descriptor for user_agent field.
+	sessionDescUserAgent := sessionMixinFields0[4].Descriptor()
+	// session.DefaultUserAgent holds the default value on creation for the user_agent field.
+	session.DefaultUserAgent = sessionDescUserAgent.Default.(string)
+	// sessionDescPending2fa is the schema descriptor for pending_2fa field.
+	sessionDescPending2fa := sessionMixinFields0[5].Descriptor()
+	// session.DefaultPending2fa holds the default value on creation for the pending_2fa field.
+	session.DefaultPending2fa = sessionDescPending2fa.Default.(bool)
+	// sessionDescCreatedAt is the schema descriptor for created_at field.
+	sessionDescCreatedAt := sessionMixinFields0[6].Descriptor()
+	// session.DefaultCreatedAt holds the default value on creation for the created_at field.
+	session.DefaultCreatedAt = sessionDescCreatedAt.Default.(func() time.Time)
+	// sessionDescUpdatedAt is the schema descriptor for updated_at field.
+	sessionDescUpdatedAt := sessionMixinFields0[7].Descriptor()
+	// session.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	session.DefaultUpdatedAt = sessionDescUpdatedAt.Default.(func() time.Time)
+	// session.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	session.UpdateDefaultUpdatedAt = sessionDescUpdatedAt.UpdateDefault.(func() time.Time)
 	userMixin := schema.User{}.Mixin()
 	userMixinFields0 := userMixin[0].Fields()
 	_ = userMixinFields0

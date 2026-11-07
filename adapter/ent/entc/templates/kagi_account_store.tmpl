@@ -1,0 +1,246 @@
+{{/* gotype: entgo.io/ent/entc/gen.Graph */}}
+
+{{ define "kagi_account_store" }}
+
+{{ $pkg := base $.Config.Package }}
+{{ template "header" $ }}
+
+{{/* Find the node that represents the Kagi Account */}}
+{{ $accountNode := "" }}
+{{ range $n := $.Nodes }}
+	{{ if or (hasKey $n.Annotations "KagiAccount") (eq $n.Name "Account") }}
+		{{ $accountNode = $n }}
+	{{ end }}
+{{ end }}
+
+{{ if $accountNode }}
+import (
+	"context"
+	{{- if or $accountNode.ID.IsInt $accountNode.ID.IsInt64 }}
+	"strconv"
+	{{- end }}
+	{{- if $accountNode.ID.IsUUID }}
+	"github.com/google/uuid"
+	{{- end }}
+
+	"github.com/kilip/kagi"
+	{{ $accountNode.Package }} "{{ $accountNode.Config.Package }}/{{ $accountNode.PackageDir }}"
+)
+
+// KagiAccountStore implements kagi.AccountStore using the ent client.
+type KagiAccountStore struct {
+	client *Client
+}
+
+// NewKagiAccountStore creates a new kagi.AccountStore backed by ent.
+func NewKagiAccountStore(client *Client) *KagiAccountStore {
+	return &KagiAccountStore{client: client}
+}
+
+var _ kagi.AccountStore = (*KagiAccountStore)(nil)
+
+// Create inserts a new account into the database.
+func (s *KagiAccountStore) Create(ctx context.Context, a *kagi.Account) error {
+	builder := s.client.{{ $accountNode.Name }}.Create().
+		SetUserID(a.UserID).
+		SetProvider(a.Provider).
+		SetProviderAccountID(a.ProviderAccountID).
+		SetPasswordHash(a.PasswordHash).
+		SetAccessToken(a.AccessToken).
+		SetRefreshToken(a.RefreshToken)
+
+	if a.TokenExpiresAt != nil {
+		builder.SetNillableTokenExpiresAt(a.TokenExpiresAt)
+	}
+	if !a.CreatedAt.IsZero() {
+		builder.SetCreatedAt(a.CreatedAt)
+	}
+	if !a.UpdatedAt.IsZero() {
+		builder.SetUpdatedAt(a.UpdatedAt)
+	}
+
+	created, err := builder.Save(ctx)
+	if err != nil {
+		if IsConstraintError(err) {
+			return kagi.ErrAccountAlreadyExists
+		}
+		return err
+	}
+
+	a.CreatedAt = created.CreatedAt
+	a.UpdatedAt = created.UpdatedAt
+
+	{{ if $accountNode.ID.IsInt -}}
+	a.ID = strconv.Itoa(created.ID)
+	{{- else if $accountNode.ID.IsInt64 -}}
+	a.ID = strconv.FormatInt(created.ID, 10)
+	{{- else if $accountNode.ID.IsString -}}
+	a.ID = created.ID
+	{{- else if $accountNode.ID.IsUUID -}}
+	a.ID = created.ID.String()
+	{{- else -}}
+	a.ID = strconv.Itoa(created.ID)
+	{{- end }}
+	return nil
+}
+
+// GetByProvider retrieves the Account matching provider and providerAccountID.
+func (s *KagiAccountStore) GetByProvider(ctx context.Context, provider, providerAccountID string) (*kagi.Account, error) {
+	if provider == "" || providerAccountID == "" {
+		return nil, kagi.ErrAccountNotFound
+	}
+
+	entity, err := s.client.{{ $accountNode.Name }}.Query().
+		Where(
+			{{ $accountNode.Package }}.ProviderEQ(provider),
+			{{ $accountNode.Package }}.ProviderAccountIDEQ(providerAccountID),
+		).
+		Only(ctx)
+	if err != nil {
+		if IsNotFound(err) {
+			return nil, kagi.ErrAccountNotFound
+		}
+		return nil, err
+	}
+
+	return s.toKagiAccount(entity), nil
+}
+
+// ListByUserID retrieves all Account records linked to the given userID.
+func (s *KagiAccountStore) ListByUserID(ctx context.Context, userID string) ([]*kagi.Account, error) {
+	entities, err := s.client.{{ $accountNode.Name }}.Query().
+		Where({{ $accountNode.Package }}.UserIDEQ(userID)).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	accounts := make([]*kagi.Account, len(entities))
+	for i, entity := range entities {
+		accounts[i] = s.toKagiAccount(entity)
+	}
+	return accounts, nil
+}
+
+// CountByUserID returns the total number of linked Account records for userID.
+func (s *KagiAccountStore) CountByUserID(ctx context.Context, userID string) (int, error) {
+	count, err := s.client.{{ $accountNode.Name }}.Query().
+		Where({{ $accountNode.Package }}.UserIDEQ(userID)).
+		Count(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// Update updates an existing account.
+func (s *KagiAccountStore) Update(ctx context.Context, a *kagi.Account) error {
+	{{ if $accountNode.ID.IsInt -}}
+	parsedID, err := strconv.Atoi(a.ID)
+	if err != nil {
+		return kagi.ErrAccountNotFound
+	}
+	{{- else if $accountNode.ID.IsInt64 -}}
+	parsedID, err := strconv.ParseInt(a.ID, 10, 64)
+	if err != nil {
+		return kagi.ErrAccountNotFound
+	}
+	{{- else if $accountNode.ID.IsUUID -}}
+	parsedID, err := uuid.Parse(a.ID)
+	if err != nil {
+		return kagi.ErrAccountNotFound
+	}
+	{{- else -}}
+	parsedID := a.ID
+	{{- end }}
+
+	builder := s.client.{{ $accountNode.Name }}.UpdateOneID(parsedID).
+		SetUserID(a.UserID).
+		SetProvider(a.Provider).
+		SetProviderAccountID(a.ProviderAccountID).
+		SetPasswordHash(a.PasswordHash).
+		SetAccessToken(a.AccessToken).
+		SetRefreshToken(a.RefreshToken)
+
+	if a.TokenExpiresAt != nil {
+		builder.SetTokenExpiresAt(*a.TokenExpiresAt)
+	} else {
+		builder.ClearTokenExpiresAt()
+	}
+
+	if !a.UpdatedAt.IsZero() {
+		builder.SetUpdatedAt(a.UpdatedAt)
+	}
+
+	err = builder.Exec(ctx)
+	if err != nil {
+		if IsNotFound(err) {
+			return kagi.ErrAccountNotFound
+		}
+		if IsConstraintError(err) {
+			return kagi.ErrAccountAlreadyExists
+		}
+		return err
+	}
+
+	return nil
+}
+
+// Delete removes an account by ID.
+func (s *KagiAccountStore) Delete(ctx context.Context, id string) error {
+	{{ if $accountNode.ID.IsInt -}}
+	parsedID, err := strconv.Atoi(id)
+	if err != nil {
+		return kagi.ErrAccountNotFound
+	}
+	{{- else if $accountNode.ID.IsInt64 -}}
+	parsedID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return kagi.ErrAccountNotFound
+	}
+	{{- else if $accountNode.ID.IsUUID -}}
+	parsedID, err := uuid.Parse(id)
+	if err != nil {
+		return kagi.ErrAccountNotFound
+	}
+	{{- else -}}
+	parsedID := id
+	{{- end }}
+
+	err = s.client.{{ $accountNode.Name }}.DeleteOneID(parsedID).Exec(ctx)
+	if err != nil {
+		if IsNotFound(err) {
+			return kagi.ErrAccountNotFound
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (s *KagiAccountStore) toKagiAccount(entity *{{ $accountNode.Name }}) *kagi.Account {
+	return &kagi.Account{
+		{{ if $accountNode.ID.IsInt -}}
+		ID: strconv.Itoa(entity.ID),
+		{{- else if $accountNode.ID.IsInt64 -}}
+		ID: strconv.FormatInt(entity.ID, 10),
+		{{- else if $accountNode.ID.IsString -}}
+		ID: entity.ID,
+		{{- else if $accountNode.ID.IsUUID -}}
+		ID: entity.ID.String(),
+		{{- else -}}
+		ID: strconv.Itoa(entity.ID),
+		{{- end }}
+		UserID:            entity.UserID,
+		Provider:          entity.Provider,
+		ProviderAccountID: entity.ProviderAccountID,
+		PasswordHash:      entity.PasswordHash,
+		AccessToken:       entity.AccessToken,
+		RefreshToken:      entity.RefreshToken,
+		TokenExpiresAt:    entity.TokenExpiresAt,
+		CreatedAt:         entity.CreatedAt,
+		UpdatedAt:         entity.UpdatedAt,
+	}
+}
+{{ end }}
+{{ end }}

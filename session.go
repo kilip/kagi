@@ -334,22 +334,120 @@ func (s *SessionService) SignOut(ctx context.Context, rawToken string) error {
 	return nil
 }
 
-// Revoke revokes a specific session belonging to userID.
+// Revoke revokes a specific session belonging to userID and evicts it from SecondaryStorage.
+// It verifies ownership and returns ErrSessionNotFound if the session does not belong to userID
+// or does not exist (ADR-0014 §6).
 func (s *SessionService) Revoke(ctx context.Context, userID, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if userID == "" || sessionID == "" {
+		return ErrSessionNotFound
+	}
+
+	sessions, err := s.store.ListByUserID(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	var found bool
+	for _, sess := range sessions {
+		if sess != nil && sess.ID == sessionID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return ErrSessionNotFound
+	}
+
+	deletedHash, err := s.store.DeleteByID(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+
+	if s.secondary != nil && deletedHash != "" {
+		if err := s.secondary.DeleteSession(ctx, deletedHash); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
-// SignOutOthers revokes all sessions for userID except currentSessionID.
+// SignOutOthers revokes all sessions for userID except currentSessionID and evicts them from SecondaryStorage.
 func (s *SessionService) SignOutOthers(ctx context.Context, userID, currentSessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if userID == "" || currentSessionID == "" {
+		return ErrSessionNotFound
+	}
+
+	deletedHashes, err := s.store.DeleteOthersByUserID(ctx, userID, currentSessionID)
+	if err != nil {
+		return err
+	}
+
+	if s.secondary != nil && len(deletedHashes) > 0 {
+		if err := s.secondary.DeleteSessions(ctx, deletedHashes); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
-// SignOutAll revokes every session for userID across all devices.
+// SignOutAll revokes every session for userID across all devices and evicts them from SecondaryStorage.
 func (s *SessionService) SignOutAll(ctx context.Context, userID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if userID == "" {
+		return nil
+	}
+
+	deletedHashes, err := s.store.DeleteByUserID(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	if s.secondary != nil && len(deletedHashes) > 0 {
+		if err := s.secondary.DeleteSessions(ctx, deletedHashes); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
 // List returns active, unexpired sessions for userID without exposing token hashes.
 func (s *SessionService) List(ctx context.Context, userID string) ([]*Session, error) {
-	return nil, nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if userID == "" {
+		return []*Session{}, nil
+	}
+
+	sessions, err := s.store.ListByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	if sessions == nil {
+		return []*Session{}, nil
+	}
+
+	for _, sess := range sessions {
+		if sess != nil {
+			sess.TokenHash = ""
+		}
+	}
+
+	return sessions, nil
 }

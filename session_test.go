@@ -1798,3 +1798,671 @@ func TestSessionService_Rotate(t *testing.T) {
 		}
 	})
 }
+
+func TestSessionService_Revoke(t *testing.T) {
+	t.Parallel()
+
+	fixedTime := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+
+	t.Run("context canceled returns error immediately", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		err := svc.Revoke(ctx, "usr_1", "sess_1")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	})
+
+	t.Run("empty userID or sessionID returns ErrSessionNotFound", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		cases := []struct {
+			userID    string
+			sessionID string
+		}{
+			{"", "sess_1"},
+			{"usr_1", ""},
+			{"", ""},
+		}
+
+		for _, tc := range cases {
+			err := svc.Revoke(context.Background(), tc.userID, tc.sessionID)
+			if !errors.Is(err, kagi.ErrSessionNotFound) {
+				t.Errorf("expected ErrSessionNotFound for (%q, %q), got %v", tc.userID, tc.sessionID, err)
+			}
+		}
+	})
+
+	t.Run("session not in user's active list returns ErrSessionNotFound", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		memStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		svc := kagi.NewSessionService(memStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		// User A has sessA
+		sessA, _, err := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_a", false, "1.1.1.1", "agent-a")
+		if err != nil {
+			t.Fatalf("failed to create session: %v", err)
+		}
+
+		// User B attempts to revoke sessA (ownership check fails)
+		err = svc.Revoke(context.Background(), "user_b", sessA.ID)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound when user does not own session, got %v", err)
+		}
+
+		// Non-existent sessionID
+		err = svc.Revoke(context.Background(), "user_a", "non-existent-id")
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound for non-existent session, got %v", err)
+		}
+
+		// sessA must remain active
+		listed, err := svc.List(context.Background(), "user_a")
+		if err != nil || len(listed) != 1 {
+			t.Fatalf("expected sessA to remain active, got %v (len %d)", err, len(listed))
+		}
+	})
+
+	t.Run("successful revocation removes from primary store and evicts from secondary", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		fakeClk := clock.NewFake(fixedTime)
+		svc := kagi.NewSessionService(mockStore, mockSec, kagi.DefaultSessionConfig(), fakeClk)
+
+		activeSess := &kagi.Session{
+			ID:        "sess_target",
+			UserID:    "user_1",
+			TokenHash: "hash_target",
+			ExpiresAt: fixedTime.Add(time.Hour),
+		}
+
+		gomock.InOrder(
+			// 1. Verify ownership
+			mockStore.EXPECT().ListByUserID(gomock.Any(), "user_1").Return([]*kagi.Session{activeSess}, nil),
+			// 2. Primary-first deletion
+			mockStore.EXPECT().DeleteByID(gomock.Any(), "sess_target").Return("hash_target", nil),
+			// 3. Secondary cache eviction
+			mockSec.EXPECT().DeleteSession(gomock.Any(), "hash_target").Return(nil),
+		)
+
+		err := svc.Revoke(context.Background(), "user_1", "sess_target")
+		if err != nil {
+			t.Fatalf("unexpected error on Revoke: %v", err)
+		}
+	})
+
+	t.Run("successful revocation with memory store end to end", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		memStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		svc := kagi.NewSessionService(memStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		sess1, rawToken1, err := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_1", false, "1.1.1.1", "a1")
+		if err != nil {
+			t.Fatalf("failed to create session: %v", err)
+		}
+		sess2, rawToken2, err := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_1", false, "1.1.1.2", "a2")
+		if err != nil {
+			t.Fatalf("failed to create session: %v", err)
+		}
+
+		err = svc.Revoke(context.Background(), "user_1", sess1.ID)
+		if err != nil {
+			t.Fatalf("unexpected error revoking session: %v", err)
+		}
+
+		// sess1 should now be revoked
+		_, _, err = svc.Validate(context.Background(), rawToken1)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound for revoked token, got %v", err)
+		}
+
+		// sess2 should still be valid
+		valSess, _, err := svc.Validate(context.Background(), rawToken2)
+		if err != nil || valSess.ID != sess2.ID {
+			t.Fatalf("expected sess2 to remain valid, got err=%v", err)
+		}
+
+		// Revoking sess1 again returns ErrSessionNotFound
+		err = svc.Revoke(context.Background(), "user_1", sess1.ID)
+		if !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected ErrSessionNotFound revoking already revoked session, got %v", err)
+		}
+	})
+
+	t.Run("primary store errors propagate", func(t *testing.T) {
+		t.Parallel()
+
+		dbErr := errors.New("db connection failure")
+
+		// ListByUserID error
+		ctrl1 := gomock.NewController(t)
+		mockStore1 := mock.NewMockSessionStore(ctrl1)
+		svc1 := kagi.NewSessionService(mockStore1, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+		mockStore1.EXPECT().ListByUserID(gomock.Any(), "user_1").Return(nil, dbErr)
+
+		err := svc1.Revoke(context.Background(), "user_1", "sess_1")
+		if !errors.Is(err, dbErr) {
+			t.Fatalf("expected dbErr, got %v", err)
+		}
+
+		// DeleteByID error
+		ctrl2 := gomock.NewController(t)
+		mockStore2 := mock.NewMockSessionStore(ctrl2)
+		svc2 := kagi.NewSessionService(mockStore2, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+		mockStore2.EXPECT().ListByUserID(gomock.Any(), "user_1").Return([]*kagi.Session{{ID: "sess_1"}}, nil)
+		mockStore2.EXPECT().DeleteByID(gomock.Any(), "sess_1").Return("", dbErr)
+
+		err = svc2.Revoke(context.Background(), "user_1", "sess_1")
+		if !errors.Is(err, dbErr) {
+			t.Fatalf("expected dbErr on DeleteByID, got %v", err)
+		}
+	})
+
+	t.Run("secondary cache error surfaces", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		svc := kagi.NewSessionService(mockStore, mockSec, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		redisErr := errors.New("redis timeout")
+		mockStore.EXPECT().ListByUserID(gomock.Any(), "user_1").Return([]*kagi.Session{{ID: "sess_1"}}, nil)
+		mockStore.EXPECT().DeleteByID(gomock.Any(), "sess_1").Return("hash_1", nil)
+		mockSec.EXPECT().DeleteSession(gomock.Any(), "hash_1").Return(redisErr)
+
+		err := svc.Revoke(context.Background(), "user_1", "sess_1")
+		if !errors.Is(err, redisErr) {
+			t.Fatalf("expected redisErr, got %v", err)
+		}
+	})
+}
+
+func TestSessionService_SignOutOthers(t *testing.T) {
+	t.Parallel()
+
+	fixedTime := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+
+	t.Run("context canceled returns error immediately", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		err := svc.SignOutOthers(ctx, "usr_1", "sess_1")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	})
+
+	t.Run("empty userID or currentSessionID returns ErrSessionNotFound", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		cases := []struct {
+			userID    string
+			sessionID string
+		}{
+			{"", "sess_1"},
+			{"usr_1", ""},
+			{"", ""},
+		}
+
+		for _, tc := range cases {
+			err := svc.SignOutOthers(context.Background(), tc.userID, tc.sessionID)
+			if !errors.Is(err, kagi.ErrSessionNotFound) {
+				t.Errorf("expected ErrSessionNotFound for (%q, %q), got %v", tc.userID, tc.sessionID, err)
+			}
+		}
+	})
+
+	t.Run("revokes all other sessions preserving current session and evicts from secondary", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		svc := kagi.NewSessionService(mockStore, mockSec, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		deletedHashes := []string{"hash_2", "hash_3"}
+		gomock.InOrder(
+			mockStore.EXPECT().DeleteOthersByUserID(gomock.Any(), "user_1", "sess_current").Return(deletedHashes, nil),
+			mockSec.EXPECT().DeleteSessions(gomock.Any(), deletedHashes).Return(nil),
+		)
+
+		err := svc.SignOutOthers(context.Background(), "user_1", "sess_current")
+		if err != nil {
+			t.Fatalf("unexpected error on SignOutOthers: %v", err)
+		}
+	})
+
+	t.Run("idempotent when no other sessions exist", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		svc := kagi.NewSessionService(mockStore, mockSec, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		// DeleteOthersByUserID returns nil, nil when no other sessions match
+		mockStore.EXPECT().DeleteOthersByUserID(gomock.Any(), "user_1", "sess_only").Return(nil, nil)
+		mockSec.EXPECT().DeleteSessions(gomock.Any(), gomock.Any()).Times(0)
+
+		err := svc.SignOutOthers(context.Background(), "user_1", "sess_only")
+		if err != nil {
+			t.Fatalf("expected nil error on idempotent SignOutOthers, got %v", err)
+		}
+	})
+
+	t.Run("integration with memory store preserves current session and leaves other users untouched", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		memStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		svc := kagi.NewSessionService(memStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		s1, tok1, _ := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_1", false, "1.1.1.1", "a1")
+		_, tok2, _ := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_1", false, "1.1.1.2", "a2")
+		_, tok3, _ := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_1", false, "1.1.1.3", "a3")
+		_, tokOther, _ := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_2", false, "2.2.2.2", "a4")
+
+		err := svc.SignOutOthers(context.Background(), "user_1", s1.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// s1 (current) must still validate
+		val1, _, err := svc.Validate(context.Background(), tok1)
+		if err != nil || val1.ID != s1.ID {
+			t.Fatalf("expected current session to remain valid, got err=%v", err)
+		}
+
+		// s2 and s3 must be revoked
+		if _, _, err := svc.Validate(context.Background(), tok2); !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected tok2 to be revoked, got %v", err)
+		}
+		if _, _, err := svc.Validate(context.Background(), tok3); !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected tok3 to be revoked, got %v", err)
+		}
+
+		// user_2 session must remain valid
+		if _, _, err := svc.Validate(context.Background(), tokOther); err != nil {
+			t.Fatalf("expected user_2 session untouched, got %v", err)
+		}
+	})
+
+	t.Run("primary store error propagates", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		dbErr := errors.New("db error")
+		mockStore.EXPECT().DeleteOthersByUserID(gomock.Any(), "user_1", "sess_1").Return(nil, dbErr)
+
+		err := svc.SignOutOthers(context.Background(), "user_1", "sess_1")
+		if !errors.Is(err, dbErr) {
+			t.Fatalf("expected dbErr, got %v", err)
+		}
+	})
+
+	t.Run("secondary storage error surfaces", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		svc := kagi.NewSessionService(mockStore, mockSec, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		redisErr := errors.New("redis failure")
+		mockStore.EXPECT().DeleteOthersByUserID(gomock.Any(), "user_1", "sess_1").Return([]string{"h2"}, nil)
+		mockSec.EXPECT().DeleteSessions(gomock.Any(), []string{"h2"}).Return(redisErr)
+
+		err := svc.SignOutOthers(context.Background(), "user_1", "sess_1")
+		if !errors.Is(err, redisErr) {
+			t.Fatalf("expected redisErr, got %v", err)
+		}
+	})
+}
+
+func TestSessionService_SignOutAll(t *testing.T) {
+	t.Parallel()
+
+	fixedTime := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+
+	t.Run("context canceled returns error immediately", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		err := svc.SignOutAll(ctx, "usr_1")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	})
+
+	t.Run("empty userID is an idempotent no-op", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		svc := kagi.NewSessionService(mockStore, mockSec, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		mockStore.EXPECT().DeleteByUserID(gomock.Any(), gomock.Any()).Times(0)
+		mockSec.EXPECT().DeleteSessions(gomock.Any(), gomock.Any()).Times(0)
+
+		err := svc.SignOutAll(context.Background(), "")
+		if err != nil {
+			t.Fatalf("expected nil error on empty userID, got %v", err)
+		}
+	})
+
+	t.Run("revokes all sessions for user and evicts from secondary", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		svc := kagi.NewSessionService(mockStore, mockSec, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		deletedHashes := []string{"h1", "h2", "h3"}
+		gomock.InOrder(
+			mockStore.EXPECT().DeleteByUserID(gomock.Any(), "user_1").Return(deletedHashes, nil),
+			mockSec.EXPECT().DeleteSessions(gomock.Any(), deletedHashes).Return(nil),
+		)
+
+		err := svc.SignOutAll(context.Background(), "user_1")
+		if err != nil {
+			t.Fatalf("unexpected error on SignOutAll: %v", err)
+		}
+	})
+
+	t.Run("idempotent when user has no active sessions", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		svc := kagi.NewSessionService(mockStore, mockSec, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		mockStore.EXPECT().DeleteByUserID(gomock.Any(), "user_empty").Return(nil, nil)
+		mockSec.EXPECT().DeleteSessions(gomock.Any(), gomock.Any()).Times(0)
+
+		err := svc.SignOutAll(context.Background(), "user_empty")
+		if err != nil {
+			t.Fatalf("expected nil error on idempotent SignOutAll, got %v", err)
+		}
+	})
+
+	t.Run("integration with memory store revokes all user sessions and leaves others untouched", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		memStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		svc := kagi.NewSessionService(memStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		_, tok1, _ := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_1", false, "1.1.1.1", "a1")
+		_, tok2, _ := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_1", false, "1.1.1.2", "a2")
+		_, tokOther, _ := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_2", false, "2.2.2.2", "a3")
+
+		err := svc.SignOutAll(context.Background(), "user_1")
+		if err != nil {
+			t.Fatalf("unexpected error on SignOutAll: %v", err)
+		}
+
+		// user_1 sessions must be revoked
+		if _, _, err := svc.Validate(context.Background(), tok1); !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected tok1 to be revoked, got %v", err)
+		}
+		if _, _, err := svc.Validate(context.Background(), tok2); !errors.Is(err, kagi.ErrSessionNotFound) {
+			t.Fatalf("expected tok2 to be revoked, got %v", err)
+		}
+
+		// user_2 session must remain valid
+		if _, _, err := svc.Validate(context.Background(), tokOther); err != nil {
+			t.Fatalf("expected user_2 session untouched, got %v", err)
+		}
+
+		// List for user_1 should be empty
+		list, err := svc.List(context.Background(), "user_1")
+		if err != nil || len(list) != 0 {
+			t.Fatalf("expected 0 sessions after SignOutAll, got %v (len %d)", err, len(list))
+		}
+	})
+
+	t.Run("primary store error propagates", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		dbErr := errors.New("db error")
+		mockStore.EXPECT().DeleteByUserID(gomock.Any(), "user_1").Return(nil, dbErr)
+
+		err := svc.SignOutAll(context.Background(), "user_1")
+		if !errors.Is(err, dbErr) {
+			t.Fatalf("expected dbErr, got %v", err)
+		}
+	})
+
+	t.Run("secondary storage error surfaces", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+		svc := kagi.NewSessionService(mockStore, mockSec, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		redisErr := errors.New("redis failure")
+		mockStore.EXPECT().DeleteByUserID(gomock.Any(), "user_1").Return([]string{"h1"}, nil)
+		mockSec.EXPECT().DeleteSessions(gomock.Any(), []string{"h1"}).Return(redisErr)
+
+		err := svc.SignOutAll(context.Background(), "user_1")
+		if !errors.Is(err, redisErr) {
+			t.Fatalf("expected redisErr, got %v", err)
+		}
+	})
+}
+
+func TestSessionService_List(t *testing.T) {
+	t.Parallel()
+
+	fixedTime := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+
+	t.Run("context canceled returns error immediately", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		sessions, err := svc.List(ctx, "usr_1")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+		if sessions != nil {
+			t.Fatalf("expected nil sessions on error")
+		}
+	})
+
+	t.Run("empty userID returns empty non-nil slice without storage call", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		mockStore.EXPECT().ListByUserID(gomock.Any(), gomock.Any()).Times(0)
+
+		sessions, err := svc.List(context.Background(), "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sessions == nil || len(sessions) != 0 {
+			t.Fatalf("expected empty non-nil slice, got %v", sessions)
+		}
+	})
+
+	t.Run("store returning nil slice returns empty non-nil slice", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		mockStore.EXPECT().ListByUserID(gomock.Any(), "user_1").Return(nil, nil)
+
+		sessions, err := svc.List(context.Background(), "user_1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sessions == nil || len(sessions) != 0 {
+			t.Fatalf("expected empty non-nil slice, got %v", sessions)
+		}
+	})
+
+	t.Run("security sanitization clears TokenHash on all returned sessions", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		storeSessions := []*kagi.Session{
+			{
+				ID:        "s1",
+				UserID:    "user_1",
+				TokenHash: "super-secret-hash-1",
+				IPAddress: "10.0.0.1",
+				UserAgent: "agent-1",
+			},
+			{
+				ID:        "s2",
+				UserID:    "user_1",
+				TokenHash: "super-secret-hash-2",
+				IPAddress: "10.0.0.2",
+				UserAgent: "agent-2",
+			},
+		}
+		mockStore.EXPECT().ListByUserID(gomock.Any(), "user_1").Return(storeSessions, nil)
+
+		sessions, err := svc.List(context.Background(), "user_1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(sessions) != 2 {
+			t.Fatalf("expected 2 sessions, got %d", len(sessions))
+		}
+
+		for _, s := range sessions {
+			if s.TokenHash != "" {
+				t.Errorf("security violation: TokenHash not sanitized on session %s: %q", s.ID, s.TokenHash)
+			}
+		}
+	})
+
+	t.Run("integration with memory store filters pending 2FA and expired sessions", func(t *testing.T) {
+		t.Parallel()
+
+		fakeClk := clock.NewFake(fixedTime)
+		memStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		svc := kagi.NewSessionService(memStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		// Active session 1
+		s1, _, err := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_1", false, "10.0.0.1", "agent-1")
+		if err != nil {
+			t.Fatalf("failed to create session: %v", err)
+		}
+		// Active session 2
+		s2, _, err := kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_1", false, "10.0.0.2", "agent-2")
+		if err != nil {
+			t.Fatalf("failed to create session: %v", err)
+		}
+		// Pending 2FA session (should NOT be returned)
+		_, _, err = kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_1", true, "10.0.0.3", "agent-3")
+		if err != nil {
+			t.Fatalf("failed to create pending 2FA session: %v", err)
+		}
+		// Other user's session (should NOT be returned)
+		_, _, err = kagi.SessionServiceCreateSessionForTest(svc, context.Background(), "user_2", false, "10.0.0.4", "agent-4")
+		if err != nil {
+			t.Fatalf("failed to create other user session: %v", err)
+		}
+
+		sessions, err := svc.List(context.Background(), "user_1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(sessions) != 2 {
+			t.Fatalf("expected exactly 2 active sessions, got %d", len(sessions))
+		}
+
+		ids := map[string]bool{sessions[0].ID: true, sessions[1].ID: true}
+		if !ids[s1.ID] || !ids[s2.ID] {
+			t.Fatalf("expected session IDs %s and %s, got %v and %v", s1.ID, s2.ID, sessions[0].ID, sessions[1].ID)
+		}
+		for _, s := range sessions {
+			if s.TokenHash != "" {
+				t.Errorf("TokenHash must be cleared, got %q", s.TokenHash)
+			}
+			if s.Pending2FA {
+				t.Errorf("pending 2FA session must not be included")
+			}
+		}
+	})
+
+	t.Run("primary store error propagates", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		mockStore := mock.NewMockSessionStore(ctrl)
+		svc := kagi.NewSessionService(mockStore, nil, kagi.DefaultSessionConfig(), clock.NewFake(fixedTime))
+
+		dbErr := errors.New("db query error")
+		mockStore.EXPECT().ListByUserID(gomock.Any(), "user_1").Return(nil, dbErr)
+
+		sessions, err := svc.List(context.Background(), "user_1")
+		if !errors.Is(err, dbErr) {
+			t.Fatalf("expected dbErr, got %v", err)
+		}
+		if sessions != nil {
+			t.Fatalf("expected nil sessions on error")
+		}
+	})
+}

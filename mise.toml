@@ -23,4 +23,4 @@ run = "go generate ./..."
 
 [tasks.openapi]
 description = "Generate OpenAPI 3.1 spec from Go comments in http/fiber"
-run = "cd http/fiber && swag init --v3.1 -g doc.go -o openapi"
+run = "cd http/fiber && swag init --v3.1 -g doc.go -o openapi -d .,../.."

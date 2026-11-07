@@ -1,0 +1,233 @@
+components:
+  schemas:
+    fiber.AuthResponse:
+      properties:
+        session:
+          $ref: '#/components/schemas/kagi.Session'
+        user:
+          $ref: '#/components/schemas/kagi.User'
+      type: object
+    fiber.ErrorResponse:
+      properties:
+        error:
+          type: string
+      type: object
+    fiber.SignInRequest:
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+      type: object
+    fiber.SignOutResponse:
+      properties:
+        message:
+          type: string
+      type: object
+    fiber.SignUpRequest:
+      properties:
+        email:
+          type: string
+        name:
+          type: string
+        password:
+          type: string
+      type: object
+    kagi.Session:
+      properties:
+        created_at:
+          description: CreatedAt is the timestamp when the session was created, defining
+            the absolute timeout ceiling.
+          type: string
+        expires_at:
+          description: ExpiresAt is the timestamp when this session expires, governed
+            by idle and absolute timeouts.
+          type: string
+        id:
+          description: ID is the unique string identifier for the session entity (ADR-0011).
+          type: string
+        ip_address:
+          description: IPAddress is the client IP address observed during session
+            creation or renewal; empty if unknown.
+          type: string
+        pending_2fa:
+          description: |-
+            Pending2FA indicates whether the session is awaiting two-factor verification.
+            Protected endpoints strictly reject sessions with Pending2FA == true (ADR-0014).
+          type: boolean
+        updated_at:
+          description: UpdatedAt is the timestamp when the session was last refreshed
+            or updated.
+          type: string
+        user_agent:
+          description: UserAgent is the client User-Agent header observed during session
+            creation or renewal; empty if unknown.
+          type: string
+        user_id:
+          description: UserID is the foreign key identifier linking this session to
+            a User (ADR-0011).
+          type: string
+      type: object
+    kagi.User:
+      properties:
+        created_at:
+          description: CreatedAt is the timestamp when the user identity was created.
+          type: string
+        email:
+          description: Email is the primary email address of the user.
+          type: string
+        email_verified:
+          description: EmailVerified indicates whether the user's primary email address
+            has been verified.
+          type: boolean
+        id:
+          description: ID is the unique string identifier for the user (ADR-0011).
+          type: string
+        name:
+          description: Name is the display name or full name of the user.
+          type: string
+        two_factor_enabled:
+          description: TwoFactorEnabled indicates whether two-factor authentication
+            is enforced for this user.
+          type: boolean
+        updated_at:
+          description: UpdatedAt is the timestamp when the user identity was last
+            updated.
+          type: string
+      type: object
+  securitySchemes:
+    SessionCookie:
+      description: Opaque session token stored in an HttpOnly, Secure cookie.
+      in: cookie
+      name: kagi_session
+      type: apiKey
+externalDocs:
+  description: ""
+  url: ""
+info:
+  description: Reusable authentication HTTP API powered by Kagi.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  title: Kagi Authentication API
+  version: 1.0.0
+openapi: 3.1.0
+paths:
+  /sign-in:
+    post:
+      description: Authenticates user credentials and establishes a session delivered
+        via HttpOnly cookie.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/fiber.SignInRequest'
+              description: User credentials
+              summary: request
+        description: User credentials
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/fiber.AuthResponse'
+          description: Successfully authenticated
+          headers:
+            Set-Cookie:
+              description: kagi_session=...; Path=/; HttpOnly; Secure; SameSite=Lax
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/fiber.ErrorResponse'
+          description: Invalid request payload
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/fiber.ErrorResponse'
+          description: Invalid credentials
+        "429":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/fiber.ErrorResponse'
+          description: Rate limit exceeded
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/fiber.ErrorResponse'
+          description: Internal server error
+      summary: Sign in with credentials
+      tags:
+      - Authentication
+  /sign-out:
+    post:
+      description: Revokes the current session and clears the session cookie.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/fiber.SignOutResponse'
+          description: Successfully signed out
+          headers:
+            Set-Cookie:
+              description: kagi_session=; Path=/; Max-Age=-1; HttpOnly; Secure; SameSite=Lax
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/fiber.ErrorResponse'
+          description: Internal server error
+      summary: Sign out
+      tags:
+      - Authentication
+  /sign-up:
+    post:
+      description: Registers a new user account with email and password credentials.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/fiber.SignUpRequest'
+              description: Sign up credentials
+              summary: request
+        description: Sign up credentials
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/kagi.User'
+          description: User successfully registered
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/fiber.ErrorResponse'
+          description: Invalid request payload or weak password
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/fiber.ErrorResponse'
+          description: Email already registered
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/fiber.ErrorResponse'
+          description: Internal server error
+      summary: Register a new user
+      tags:
+      - Authentication
+servers:
+- url: /auth

@@ -144,4 +144,24 @@
 // The linked profile entity can be created and managed via Ent mutation hooks on
 // User creation or within application service logic, keeping authentication
 // credentials and business domain models strictly decoupled.
+
+// # Database Compatibility and Conformance Testing
+//
+// Ent translates queries into dialect-specific SQL, supporting both SQLite and
+// PostgreSQL database engines for Kagi storage adapters. All primary storage
+// ports adhere to the adaptertest conformance suite (ADR-0007).
+//
+// To run the conformance test suite locally:
+//
+//   - SQLite (default, in-memory):
+//
+//     go test ./...
+//
+//   - PostgreSQL:
+//
+//     TEST_POSTGRES_DSN="postgres://user:password@localhost:5432/dbname?sslmode=disable" go test -v ./...
+//
+// If TEST_POSTGRES_DSN is not configured, PostgreSQL conformance tests are
+// automatically skipped. In CI workflows, a PostgreSQL service container is
+// provisioned and runs automatically alongside SQLite tests.
 package ent

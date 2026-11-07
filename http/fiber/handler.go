@@ -32,12 +32,14 @@ func Register(router fiber.Router, auth *kagi.Kagi, opts ...Option) *Handler {
 		group = router.Group(cfg.Prefix)
 	}
 
-	return &Handler{
+	h := &Handler{
 		auth:   auth,
 		cfg:    cfg,
 		router: router,
 		group:  group,
 	}
+	h.registerRoutes()
+	return h
 }
 
 // Config returns the handler configuration.
@@ -53,4 +55,8 @@ func (h *Handler) Auth() *kagi.Kagi {
 // Group returns the mounted Fiber router group.
 func (h *Handler) Group() fiber.Router {
 	return h.group
+}
+
+func (h *Handler) registerRoutes() {
+	h.group.Post("/sign-up", h.SignUp)
 }

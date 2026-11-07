@@ -332,66 +332,345 @@ func TestNew_RateLimitDefaults(t *testing.T) {
 	})
 }
 
-type cleanupTrackingSessionStore struct {
+type configurableCleanupSessionStore struct {
 	mockSessionStore
-	deletedCount int
+	deleteFn func(ctx context.Context, batchSize int) (int, error)
+	calls    []int
 }
 
-func (s *cleanupTrackingSessionStore) DeleteExpired(ctx context.Context, batchSize int) (int, error) {
-	s.deletedCount += 5
-	return 5, nil
+func (s *configurableCleanupSessionStore) DeleteExpired(ctx context.Context, batchSize int) (int, error) {
+	s.calls = append(s.calls, batchSize)
+	if s.deleteFn != nil {
+		return s.deleteFn(ctx, batchSize)
+	}
+	return 0, nil
 }
 
-type cleanupTrackingVerificationStore struct {
+type configurableCleanupVerificationStore struct {
 	mockVerificationStore
-	deletedCount int
+	deleteFn func(ctx context.Context, batchSize int) (int, error)
+	calls    []int
 }
 
-func (v *cleanupTrackingVerificationStore) DeleteExpired(ctx context.Context, batchSize int) (int, error) {
-	v.deletedCount += 3
-	return 3, nil
+func (v *configurableCleanupVerificationStore) DeleteExpired(ctx context.Context, batchSize int) (int, error) {
+	v.calls = append(v.calls, batchSize)
+	if v.deleteFn != nil {
+		return v.deleteFn(ctx, batchSize)
+	}
+	return 0, nil
 }
 
-type cleanupTrackingRateLimitStore struct {
+type configurableCleanupRateLimitStore struct {
 	mockRateLimitStore
-	deletedCount int
+	deleteFn func(ctx context.Context, batchSize int) (int, error)
+	calls    []int
 }
 
-func (r *cleanupTrackingRateLimitStore) DeleteExpired(ctx context.Context, batchSize int) (int, error) {
-	r.deletedCount += 10
-	return 10, nil
+func (r *configurableCleanupRateLimitStore) DeleteExpired(ctx context.Context, batchSize int) (int, error) {
+	r.calls = append(r.calls, batchSize)
+	if r.deleteFn != nil {
+		return r.deleteFn(ctx, batchSize)
+	}
+	return 0, nil
 }
 
 func TestKagi_Cleanup(t *testing.T) {
-	sessionStore := &cleanupTrackingSessionStore{}
-	verificationStore := &cleanupTrackingVerificationStore{}
-	rateLimitStore := &cleanupTrackingRateLimitStore{}
+	validSecret := "a-very-long-master-secret-at-least-32-bytes-long"
 
-	instance, err := kagi.New(kagi.Config{
-		UserStore:         &mockUserStore{},
-		AccountStore:      &mockAccountStore{},
-		SessionStore:      sessionStore,
-		VerificationStore: verificationStore,
-		RateLimitStore:    rateLimitStore,
-		Secret:            "a-very-long-master-secret-at-least-32-bytes-long",
+	t.Run("multi-batch draining across stores", func(t *testing.T) {
+		// Mock store draining 1,200 records in batches of 500 (500, 500, 200).
+		sessionRemaining := 1200
+		sessionStore := &configurableCleanupSessionStore{
+			deleteFn: func(ctx context.Context, batchSize int) (int, error) {
+				if sessionRemaining >= batchSize {
+					sessionRemaining -= batchSize
+					return batchSize, nil
+				}
+				deleted := sessionRemaining
+				sessionRemaining = 0
+				return deleted, nil
+			},
+		}
+
+		// Verification store has 750 records (500, 250).
+		verifRemaining := 750
+		verificationStore := &configurableCleanupVerificationStore{
+			deleteFn: func(ctx context.Context, batchSize int) (int, error) {
+				if verifRemaining >= batchSize {
+					verifRemaining -= batchSize
+					return batchSize, nil
+				}
+				deleted := verifRemaining
+				verifRemaining = 0
+				return deleted, nil
+			},
+		}
+
+		// Rate limit store has 500 records exactly (500, 0).
+		rateRemaining := 500
+		rateLimitStore := &configurableCleanupRateLimitStore{
+			deleteFn: func(ctx context.Context, batchSize int) (int, error) {
+				if rateRemaining >= batchSize {
+					rateRemaining -= batchSize
+					return batchSize, nil
+				}
+				deleted := rateRemaining
+				rateRemaining = 0
+				return deleted, nil
+			},
+		}
+
+		instance, err := kagi.New(kagi.Config{
+			UserStore:         &mockUserStore{},
+			AccountStore:      &mockAccountStore{},
+			SessionStore:      sessionStore,
+			VerificationStore: verificationStore,
+			RateLimitStore:    rateLimitStore,
+			Secret:            validSecret,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if err := instance.Cleanup(context.Background()); err != nil {
+			t.Fatalf("Cleanup failed: %v", err)
+		}
+
+		if len(sessionStore.calls) != 3 {
+			t.Errorf("expected 3 session delete calls (500, 500, 200), got %d", len(sessionStore.calls))
+		}
+		if len(verificationStore.calls) != 2 {
+			t.Errorf("expected 2 verification delete calls (500, 250), got %d", len(verificationStore.calls))
+		}
+		if len(rateLimitStore.calls) != 2 {
+			t.Errorf("expected 2 rate limit delete calls (500, 0), got %d", len(rateLimitStore.calls))
+		}
+		if sessionRemaining != 0 || verifRemaining != 0 || rateRemaining != 0 {
+			t.Errorf("expected all expired records drained, got rem: sess=%d, verif=%d, rl=%d",
+				sessionRemaining, verifRemaining, rateRemaining)
+		}
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 
-	if err := instance.Cleanup(context.Background()); err != nil {
-		t.Fatalf("Cleanup failed: %v", err)
-	}
+	t.Run("context cancellation stops mid-batch", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		callCount := 0
 
-	if sessionStore.deletedCount != 5 {
-		t.Errorf("expected 5 sessions deleted, got %d", sessionStore.deletedCount)
-	}
-	if verificationStore.deletedCount != 3 {
-		t.Errorf("expected 3 verifications deleted, got %d", verificationStore.deletedCount)
-	}
-	if rateLimitStore.deletedCount != 10 {
-		t.Errorf("expected 10 rate limits deleted, got %d", rateLimitStore.deletedCount)
-	}
+		sessionStore := &configurableCleanupSessionStore{
+			deleteFn: func(c context.Context, batchSize int) (int, error) {
+				callCount++
+				if callCount == 1 {
+					cancel()
+					return batchSize, nil
+				}
+				return 0, nil
+			},
+		}
+		verificationStore := &configurableCleanupVerificationStore{}
+		rateLimitStore := &configurableCleanupRateLimitStore{}
+
+		instance, err := kagi.New(kagi.Config{
+			UserStore:         &mockUserStore{},
+			AccountStore:      &mockAccountStore{},
+			SessionStore:      sessionStore,
+			VerificationStore: verificationStore,
+			RateLimitStore:    rateLimitStore,
+			Secret:            validSecret,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		err = instance.Cleanup(ctx)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+
+		if callCount != 1 {
+			t.Errorf("expected exactly 1 call before cancellation check, got %d", callCount)
+		}
+		if len(verificationStore.calls) != 0 {
+			t.Errorf("expected verification store to not be called, got %d calls", len(verificationStore.calls))
+		}
+		if len(rateLimitStore.calls) != 0 {
+			t.Errorf("expected rate limit store to not be called, got %d calls", len(rateLimitStore.calls))
+		}
+	})
+
+	t.Run("context already canceled returns immediately", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		sessionStore := &configurableCleanupSessionStore{}
+		verificationStore := &configurableCleanupVerificationStore{}
+		rateLimitStore := &configurableCleanupRateLimitStore{}
+
+		instance, err := kagi.New(kagi.Config{
+			UserStore:         &mockUserStore{},
+			AccountStore:      &mockAccountStore{},
+			SessionStore:      sessionStore,
+			VerificationStore: verificationStore,
+			RateLimitStore:    rateLimitStore,
+			Secret:            validSecret,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		err = instance.Cleanup(ctx)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+		if len(sessionStore.calls) != 0 || len(verificationStore.calls) != 0 || len(rateLimitStore.calls) != 0 {
+			t.Fatalf("expected 0 store calls when context already canceled")
+		}
+	})
+
+	t.Run("error aggregation with errors.Join", func(t *testing.T) {
+		errSession := errors.New("session store db error")
+		errRateLimit := errors.New("rate limit store connection timeout")
+
+		sessionStore := &configurableCleanupSessionStore{
+			deleteFn: func(ctx context.Context, batchSize int) (int, error) {
+				return 0, errSession
+			},
+		}
+		verificationStore := &configurableCleanupVerificationStore{
+			deleteFn: func(ctx context.Context, batchSize int) (int, error) {
+				return 10, nil // deleted < batchSize, succeeds
+			},
+		}
+		rateLimitStore := &configurableCleanupRateLimitStore{
+			deleteFn: func(ctx context.Context, batchSize int) (int, error) {
+				return 0, errRateLimit
+			},
+		}
+
+		instance, err := kagi.New(kagi.Config{
+			UserStore:         &mockUserStore{},
+			AccountStore:      &mockAccountStore{},
+			SessionStore:      sessionStore,
+			VerificationStore: verificationStore,
+			RateLimitStore:    rateLimitStore,
+			Secret:            validSecret,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		err = instance.Cleanup(context.Background())
+		if err == nil {
+			t.Fatalf("expected composite error, got nil")
+		}
+
+		if !errors.Is(err, errSession) {
+			t.Errorf("expected err to contain errSession: %v", err)
+		}
+		if !errors.Is(err, errRateLimit) {
+			t.Errorf("expected err to contain errRateLimit: %v", err)
+		}
+
+		// Ensure verification store was not skipped despite session error
+		if len(verificationStore.calls) != 1 {
+			t.Errorf("expected verification store to be called despite session failure, got %d calls", len(verificationStore.calls))
+		}
+		if len(rateLimitStore.calls) != 1 {
+			t.Errorf("expected rate limit store to be called, got %d calls", len(rateLimitStore.calls))
+		}
+	})
+
+	t.Run("idempotency with zero expired records", func(t *testing.T) {
+		sessionStore := &configurableCleanupSessionStore{}
+		verificationStore := &configurableCleanupVerificationStore{}
+		rateLimitStore := &configurableCleanupRateLimitStore{}
+
+		instance, err := kagi.New(kagi.Config{
+			UserStore:         &mockUserStore{},
+			AccountStore:      &mockAccountStore{},
+			SessionStore:      sessionStore,
+			VerificationStore: verificationStore,
+			RateLimitStore:    rateLimitStore,
+			Secret:            validSecret,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		for i := 0; i < 3; i++ {
+			if err := instance.Cleanup(context.Background()); err != nil {
+				t.Fatalf("run %d failed: %v", i+1, err)
+			}
+		}
+
+		// Each store should be queried once per Cleanup invocation
+		if len(sessionStore.calls) != 3 {
+			t.Errorf("expected 3 calls, got %d", len(sessionStore.calls))
+		}
+		if len(verificationStore.calls) != 3 {
+			t.Errorf("expected 3 calls, got %d", len(verificationStore.calls))
+		}
+		if len(rateLimitStore.calls) != 3 {
+			t.Errorf("expected 3 calls, got %d", len(rateLimitStore.calls))
+		}
+	})
+
+	t.Run("configurable batch size vs default", func(t *testing.T) {
+		tests := []struct {
+			name              string
+			configuredBatch   int
+			expectedBatchSize int
+		}{
+			{
+				name:              "default when 0",
+				configuredBatch:   0,
+				expectedBatchSize: kagi.DefaultCleanupBatchSize,
+			},
+			{
+				name:              "default when negative",
+				configuredBatch:   -10,
+				expectedBatchSize: kagi.DefaultCleanupBatchSize,
+			},
+			{
+				name:              "custom positive batch size",
+				configuredBatch:   100,
+				expectedBatchSize: 100,
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				sessionStore := &configurableCleanupSessionStore{}
+				verificationStore := &configurableCleanupVerificationStore{}
+				rateLimitStore := &configurableCleanupRateLimitStore{}
+
+				instance, err := kagi.New(kagi.Config{
+					UserStore:         &mockUserStore{},
+					AccountStore:      &mockAccountStore{},
+					SessionStore:      sessionStore,
+					VerificationStore: verificationStore,
+					RateLimitStore:    rateLimitStore,
+					Secret:            validSecret,
+					CleanupBatchSize:  tc.configuredBatch,
+				})
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+
+				if err := instance.Cleanup(context.Background()); err != nil {
+					t.Fatalf("unexpected cleanup error: %v", err)
+				}
+
+				if len(sessionStore.calls) == 0 || sessionStore.calls[0] != tc.expectedBatchSize {
+					t.Errorf("expected batch size %d, got %v", tc.expectedBatchSize, sessionStore.calls)
+				}
+				if len(verificationStore.calls) == 0 || verificationStore.calls[0] != tc.expectedBatchSize {
+					t.Errorf("expected batch size %d, got %v", tc.expectedBatchSize, verificationStore.calls)
+				}
+				if len(rateLimitStore.calls) == 0 || rateLimitStore.calls[0] != tc.expectedBatchSize {
+					t.Errorf("expected batch size %d, got %v", tc.expectedBatchSize, rateLimitStore.calls)
+				}
+			})
+		}
+	})
 }
 
 func TestCredentialService_WiringAndDefaults(t *testing.T) {

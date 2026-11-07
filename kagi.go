@@ -3,6 +3,7 @@ package kagi
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/kilip/kagi/internal/clock"
@@ -42,7 +43,15 @@ type Config struct {
 
 	// Deterministic clock for unit testing (defaults to real system clock)
 	Clock clock.Clock
+
+	// CleanupBatchSize determines the maximum number of expired records deleted
+	// per query batch during Cleanup (ADR-0010).
+	// If <= 0, defaults to DefaultCleanupBatchSize (500).
+	CleanupBatchSize int
 }
+
+// DefaultCleanupBatchSize is the default batch size for deleting expired records (ADR-0010).
+const DefaultCleanupBatchSize = 500
 
 // Kagi is the primary authentication coordinator, exposing domain services and maintenance routines.
 type Kagi struct {
@@ -83,6 +92,9 @@ func New(cfg Config) (*Kagi, error) {
 		cfg.RateLimit.SignInEmail.Limit == 0 && cfg.RateLimit.SignInEmail.Window == 0 &&
 		cfg.RateLimit.SignInIP.Limit == 0 && cfg.RateLimit.SignInIP.Window == 0 {
 		cfg.RateLimit = DefaultRateLimitConfig()
+	}
+	if cfg.CleanupBatchSize <= 0 {
+		cfg.CleanupBatchSize = DefaultCleanupBatchSize
 	}
 
 	// Invariant validation (ADR-0014)
@@ -131,20 +143,54 @@ func New(cfg Config) (*Kagi, error) {
 
 // Cleanup performs a single batched, idempotent deletion of expired sessions,
 // verifications, and rate limit counters (ADR-0010).
+//
+// It drains expired records in bounded batches (configured via Config.CleanupBatchSize)
+// across SessionStore, VerificationStore, and RateLimitStore until each store has fewer expired
+// records than batchSize. If ctx is canceled or timed out before or during processing, Cleanup
+// halts and returns the context error immediately. Non-cancellation errors from independent stores
+// are accumulated via errors.Join to ensure one store failure does not prevent cleanup of others.
 func (k *Kagi) Cleanup(ctx context.Context) error {
-	const batchSize = 500
-
-	if _, err := k.cfg.SessionStore.DeleteExpired(ctx, batchSize); err != nil {
-		return err
-	}
-	if _, err := k.cfg.VerificationStore.DeleteExpired(ctx, batchSize); err != nil {
-		return err
-	}
-	if _, err := k.cfg.RateLimitStore.DeleteExpired(ctx, batchSize); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	return nil
+	batchSize := k.cfg.CleanupBatchSize
+	if batchSize <= 0 {
+		batchSize = DefaultCleanupBatchSize
+	}
+
+	drain := func(deleteExpired func(context.Context, int) (int, error)) error {
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			deleted, err := deleteExpired(ctx, batchSize)
+			if err != nil {
+				return err
+			}
+			if deleted < batchSize {
+				return nil
+			}
+		}
+	}
+
+	var errs []error
+	stores := []func(context.Context, int) (int, error){
+		k.cfg.SessionStore.DeleteExpired,
+		k.cfg.VerificationStore.DeleteExpired,
+		k.cfg.RateLimitStore.DeleteExpired,
+	}
+
+	for _, deleteFn := range stores {
+		if err := drain(deleteFn); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // RunCleanup starts an opt-in background ticker executing Cleanup periodically until ctx cancellation (ADR-0010).

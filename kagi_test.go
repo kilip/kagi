@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -669,6 +670,152 @@ func TestKagi_Cleanup(t *testing.T) {
 					t.Errorf("expected batch size %d, got %v", tc.expectedBatchSize, rateLimitStore.calls)
 				}
 			})
+		}
+	})
+}
+
+func TestKagi_RunCleanup(t *testing.T) {
+	validSecret := "a-very-long-master-secret-at-least-32-bytes-long"
+
+	newTestKagi := func(t *testing.T, sStore kagi.SessionStore, vStore kagi.VerificationStore, rStore kagi.RateLimitStore) *kagi.Kagi {
+		t.Helper()
+		if sStore == nil {
+			sStore = &configurableCleanupSessionStore{}
+		}
+		if vStore == nil {
+			vStore = &configurableCleanupVerificationStore{}
+		}
+		if rStore == nil {
+			rStore = &configurableCleanupRateLimitStore{}
+		}
+		inst, err := kagi.New(kagi.Config{
+			UserStore:         &mockUserStore{},
+			AccountStore:      &mockAccountStore{},
+			SessionStore:      sStore,
+			VerificationStore: vStore,
+			RateLimitStore:    rStore,
+			Secret:            validSecret,
+		})
+		if err != nil {
+			t.Fatalf("failed to create kagi instance: %v", err)
+		}
+		return inst
+	}
+
+	t.Run("ticker triggers Cleanup", func(t *testing.T) {
+		cleanupDone := make(chan struct{}, 10)
+		sessionStore := &configurableCleanupSessionStore{
+			deleteFn: func(ctx context.Context, batchSize int) (int, error) {
+				select {
+				case cleanupDone <- struct{}{}:
+				default:
+				}
+				return 0, nil
+			},
+		}
+		instance := newTestKagi(t, sessionStore, nil, nil)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		instance.RunCleanup(ctx, 10*time.Millisecond)
+
+		select {
+		case <-cleanupDone:
+			// cleanup was triggered by ticker
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("expected cleanup to be triggered by ticker, timed out")
+		}
+	})
+
+	t.Run("stops on cancel", func(t *testing.T) {
+		var callCount atomic.Int32
+		sessionStore := &configurableCleanupSessionStore{
+			deleteFn: func(ctx context.Context, batchSize int) (int, error) {
+				callCount.Add(1)
+				return 0, nil
+			},
+		}
+		instance := newTestKagi(t, sessionStore, nil, nil)
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		instance.RunCleanup(ctx, 10*time.Millisecond)
+
+		// Wait until at least 1 cleanup runs
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for callCount.Load() == 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("timed out waiting for first cleanup call")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		// Cancel context and verify no more cleanups occur
+		cancel()
+		snapshot := callCount.Load()
+
+		// Sleep across multiple intervals to ensure goroutine stopped
+		time.Sleep(50 * time.Millisecond)
+
+		// Goroutine might have been midway through one call when canceled, so allow at most +1
+		if after := callCount.Load(); after > snapshot+1 {
+			t.Errorf("expected goroutine to stop after cancel, calls grew from %d to %d", snapshot, after)
+		}
+	})
+
+	t.Run("invalid interval", func(t *testing.T) {
+		intervals := []struct {
+			name     string
+			interval time.Duration
+		}{
+			{name: "zero interval", interval: 0},
+			{name: "negative interval", interval: -10 * time.Millisecond},
+		}
+
+		for _, tc := range intervals {
+			t.Run(tc.name, func(t *testing.T) {
+				var callCount atomic.Int32
+				sessionStore := &configurableCleanupSessionStore{
+					deleteFn: func(ctx context.Context, batchSize int) (int, error) {
+						callCount.Add(1)
+						return 0, nil
+					},
+				}
+				instance := newTestKagi(t, sessionStore, nil, nil)
+
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+
+				// Should return immediately without panicking or spawning a worker
+				instance.RunCleanup(ctx, tc.interval)
+
+				time.Sleep(30 * time.Millisecond)
+				if calls := callCount.Load(); calls != 0 {
+					t.Fatalf("expected 0 calls for interval %v, got %d", tc.interval, calls)
+				}
+			})
+		}
+	})
+
+	t.Run("pre-canceled context", func(t *testing.T) {
+		var callCount atomic.Int32
+		sessionStore := &configurableCleanupSessionStore{
+			deleteFn: func(ctx context.Context, batchSize int) (int, error) {
+				callCount.Add(1)
+				return 0, nil
+			},
+		}
+		instance := newTestKagi(t, sessionStore, nil, nil)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // pre-cancel before calling RunCleanup
+
+		instance.RunCleanup(ctx, 10*time.Millisecond)
+
+		time.Sleep(30 * time.Millisecond)
+		if calls := callCount.Load(); calls != 0 {
+			t.Fatalf("expected 0 calls for pre-canceled context, got %d", calls)
 		}
 	})
 }

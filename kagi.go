@@ -193,8 +193,17 @@ func (k *Kagi) Cleanup(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// RunCleanup starts an opt-in background ticker executing Cleanup periodically until ctx cancellation (ADR-0010).
+// RunCleanup starts an opt-in background ticker executing Cleanup periodically
+// until ctx cancellation (ADR-0010).
+//
+// If interval <= 0 or ctx.Err() != nil, RunCleanup returns immediately without
+// spawning any background goroutines. Callers should manage the lifecycle of
+// the background runner via the provided context.
 func (k *Kagi) RunCleanup(ctx context.Context, interval time.Duration) {
+	if interval <= 0 || ctx.Err() != nil {
+		return
+	}
+
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()

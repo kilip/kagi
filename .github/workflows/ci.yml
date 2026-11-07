@@ -20,6 +20,20 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: kagi_test
+          POSTGRES_USER: kagi
+          POSTGRES_PASSWORD: password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -40,4 +54,6 @@ jobs:
         run: mise run vet
 
       - name: Run go test
+        env:
+          TEST_POSTGRES_DSN: "postgres://kagi:password@localhost:5432/kagi_test?sslmode=disable"
         run: mise run test

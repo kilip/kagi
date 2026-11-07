@@ -10,6 +10,7 @@ import (
 
 	"github.com/kilip/kagi/internal/clock"
 	"github.com/kilip/kagi/internal/crypto"
+	"github.com/kilip/kagi/internal/ratelimit"
 )
 
 // PasswordConfig defines argon2id hashing parameters and complexity requirements.
@@ -89,13 +90,33 @@ func WithSessionService(sessions *SessionService) CredentialOption {
 	}
 }
 
+// WithRateLimiter configures the rate limiter and rate limit policies for CredentialService.
+func WithRateLimiter(limiter *ratelimit.Limiter, cfg RateLimitConfig) CredentialOption {
+	return func(s *CredentialService) {
+		s.limiter = limiter
+		s.rateLimits = cfg
+	}
+}
+
+// WithRateLimitStore configures rate limiting on CredentialService directly from a RateLimitStore.
+func WithRateLimitStore(store RateLimitStore, cfg RateLimitConfig) CredentialOption {
+	return func(s *CredentialService) {
+		if store != nil {
+			s.limiter = ratelimit.New(store)
+		}
+		s.rateLimits = cfg
+	}
+}
+
 // CredentialService manages email/password sign-up, sign-in, and password lifecycle.
 type CredentialService struct {
-	users    UserStore
-	accounts AccountStore
-	password PasswordConfig
-	clock    clock.Clock
-	sessions *SessionService
+	users      UserStore
+	accounts   AccountStore
+	password   PasswordConfig
+	clock      clock.Clock
+	sessions   *SessionService
+	limiter    *ratelimit.Limiter
+	rateLimits RateLimitConfig
 }
 
 // NewCredentialService initializes and returns a new CredentialService.
@@ -236,6 +257,28 @@ func isValidEmail(email string) bool {
 func (s *CredentialService) SignIn(ctx context.Context, in SignInInput) (*AuthResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+
+	if s.limiter != nil && !s.rateLimits.Disabled {
+		ip := strings.TrimSpace(in.IPAddress)
+		if ip != "" && s.rateLimits.SignInIP.Limit > 0 {
+			if err := s.limiter.Take(ctx, RateLimitKeyIP(ip), s.rateLimits.SignInIP.Limit, s.rateLimits.SignInIP.Window); err != nil {
+				if errors.Is(err, ratelimit.ErrLimitExceeded) {
+					return nil, ErrRateLimitExceeded
+				}
+				return nil, err
+			}
+		}
+
+		email := strings.ToLower(strings.TrimSpace(in.Email))
+		if email != "" && s.rateLimits.SignInEmail.Limit > 0 {
+			if err := s.limiter.Take(ctx, RateLimitKeyAuth(email), s.rateLimits.SignInEmail.Limit, s.rateLimits.SignInEmail.Window); err != nil {
+				if errors.Is(err, ratelimit.ErrLimitExceeded) {
+					return nil, ErrRateLimitExceeded
+				}
+				return nil, err
+			}
+		}
 	}
 
 	email := strings.ToLower(strings.TrimSpace(in.Email))

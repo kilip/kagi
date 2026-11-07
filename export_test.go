@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/kilip/kagi/internal/clock"
+	"github.com/kilip/kagi/internal/ratelimit"
 )
 
 // CredentialServiceDependenciesForTest exposes unexported fields of CredentialService
@@ -22,6 +23,15 @@ func CredentialServiceSessionServiceForTest(s *CredentialService) *SessionServic
 		return nil
 	}
 	return s.sessions
+}
+
+// CredentialServiceRateLimiterForTest exposes unexported limiter and rateLimits fields of CredentialService
+// strictly for package-level testing in kagi_test.
+func CredentialServiceRateLimiterForTest(s *CredentialService) (*ratelimit.Limiter, RateLimitConfig) {
+	if s == nil {
+		return nil, RateLimitConfig{}
+	}
+	return s.limiter, s.rateLimits
 }
 
 // SessionServiceDependenciesForTest exposes unexported fields of SessionService

@@ -13,6 +13,7 @@ import (
 	"github.com/kilip/kagi/adapter/memory"
 	"github.com/kilip/kagi/internal/clock"
 	"github.com/kilip/kagi/internal/crypto"
+	"github.com/kilip/kagi/internal/ratelimit"
 	"github.com/kilip/kagi/mock"
 	"go.uber.org/mock/gomock"
 )
@@ -2014,11 +2015,506 @@ func TestCredentialService_FunctionalOptions(t *testing.T) {
 			t.Errorf("expected session service %v, got %v", sessSvc, got)
 		}
 	})
-
 	t.Run("nil option ignored safely", func(t *testing.T) {
 		svc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, nil)
 		if svc == nil {
 			t.Fatal("expected non-nil CredentialService")
+		}
+	})
+
+	t.Run("WithRateLimiter configures limiter and policies", func(t *testing.T) {
+		rlStore := memory.NewRateLimitStore()
+		limiter := ratelimit.New(rlStore)
+		cfg := kagi.DefaultRateLimitConfig()
+		svc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, kagi.WithRateLimiter(limiter, cfg))
+		if svc == nil {
+			t.Fatal("expected non-nil CredentialService")
+		}
+		gotLimiter, gotCfg := kagi.CredentialServiceRateLimiterForTest(svc)
+		if gotLimiter != limiter {
+			t.Errorf("expected limiter %v, got %v", limiter, gotLimiter)
+		}
+		if gotCfg != cfg {
+			t.Errorf("expected cfg %+v, got %+v", cfg, gotCfg)
+		}
+	})
+
+	t.Run("WithRateLimitStore configures limiter directly from store", func(t *testing.T) {
+		rlStore := memory.NewRateLimitStore()
+		cfg := kagi.DefaultRateLimitConfig()
+		svc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, kagi.WithRateLimitStore(rlStore, cfg))
+		if svc == nil {
+			t.Fatal("expected non-nil CredentialService")
+		}
+		gotLimiter, gotCfg := kagi.CredentialServiceRateLimiterForTest(svc)
+		if gotLimiter == nil {
+			t.Fatal("expected non-nil limiter")
+		}
+		if gotCfg != cfg {
+			t.Errorf("expected cfg %+v, got %+v", cfg, gotCfg)
+		}
+	})
+
+	t.Run("WithRateLimitStore with nil store leaves limiter nil", func(t *testing.T) {
+		cfg := kagi.DefaultRateLimitConfig()
+		svc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk, kagi.WithRateLimitStore(nil, cfg))
+		if svc == nil {
+			t.Fatal("expected non-nil CredentialService")
+		}
+		gotLimiter, gotCfg := kagi.CredentialServiceRateLimiterForTest(svc)
+		if gotLimiter != nil {
+			t.Errorf("expected nil limiter, got %v", gotLimiter)
+		}
+		if gotCfg != cfg {
+			t.Errorf("expected cfg %+v, got %+v", cfg, gotCfg)
+		}
+	})
+}
+
+func TestCredential_SignIn_RateLimit(t *testing.T) {
+	t.Parallel()
+
+	fixedTime := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	fakeClk := clock.NewFake(fixedTime)
+	pwdCfg := fastPasswordConfig()
+
+	validEmail := "user@example.com"
+	validPassword := "CorrectP@ssw0rd!"
+	validHash, err := crypto.HashPassword(validPassword, pwdCfg.ToArgon2Params())
+	if err != nil {
+		t.Fatalf("failed to hash password: %v", err)
+	}
+
+	setupBase := func() (*spyUserStore, *spyAccountStore, *memory.SessionStore, *kagi.SessionService) {
+		uStore := newSpyUserStore()
+		aStore := newSpyAccountStore()
+		sStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		sessSvc := kagi.NewSessionService(sStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		_ = uStore.Create(context.Background(), &kagi.User{
+			ID:    "usr_valid",
+			Email: validEmail,
+			Name:  "Valid User",
+		})
+		_ = aStore.Create(context.Background(), &kagi.Account{
+			UserID:            "usr_valid",
+			Provider:          "credential",
+			ProviderAccountID: validEmail,
+			PasswordHash:      validHash,
+		})
+		return uStore, aStore, sStore, sessSvc
+	}
+
+	type attempt struct {
+		input   kagi.SignInInput
+		wantErr error
+	}
+
+	tests := []struct {
+		name        string
+		cfg         kagi.RateLimitConfig
+		useStoreOpt bool
+		attempts    []attempt
+	}{
+		{
+			name: "successful sign-in within limits",
+			cfg: kagi.RateLimitConfig{
+				SignInEmail: kagi.LimitRule{Limit: 5, Window: 15 * time.Minute},
+				SignInIP:    kagi.LimitRule{Limit: 10, Window: 15 * time.Minute},
+			},
+			attempts: []attempt{
+				{
+					input:   kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"},
+					wantErr: nil,
+				},
+				{
+					input:   kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"},
+					wantErr: nil,
+				},
+			},
+		},
+		{
+			name: "exceeding SignInEmail.Limit returns ErrRateLimitExceeded",
+			cfg: kagi.RateLimitConfig{
+				SignInEmail: kagi.LimitRule{Limit: 2, Window: 15 * time.Minute},
+				SignInIP:    kagi.LimitRule{Limit: 10, Window: 15 * time.Minute},
+			},
+			attempts: []attempt{
+				{
+					input:   kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"},
+					wantErr: nil,
+				},
+				{
+					input:   kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"},
+					wantErr: nil,
+				},
+				{
+					input:   kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"},
+					wantErr: kagi.ErrRateLimitExceeded,
+				},
+			},
+		},
+		{
+			name: "exceeding SignInIP.Limit returns ErrRateLimitExceeded",
+			cfg: kagi.RateLimitConfig{
+				SignInEmail: kagi.LimitRule{Limit: 10, Window: 15 * time.Minute},
+				SignInIP:    kagi.LimitRule{Limit: 2, Window: 15 * time.Minute},
+			},
+			attempts: []attempt{
+				{
+					input:   kagi.SignInInput{Email: "user1@example.com", Password: validPassword, IPAddress: "192.0.2.100"},
+					wantErr: kagi.ErrInvalidCredentials,
+				},
+				{
+					input:   kagi.SignInInput{Email: "user2@example.com", Password: validPassword, IPAddress: "192.0.2.100"},
+					wantErr: kagi.ErrInvalidCredentials,
+				},
+				{
+					input:   kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.100"},
+					wantErr: kagi.ErrRateLimitExceeded,
+				},
+			},
+		},
+		{
+			name: "both IP and email rate limits enforced simultaneously",
+			cfg: kagi.RateLimitConfig{
+				SignInEmail: kagi.LimitRule{Limit: 2, Window: 15 * time.Minute},
+				SignInIP:    kagi.LimitRule{Limit: 4, Window: 15 * time.Minute},
+			},
+			attempts: []attempt{
+				// User 1 uses 2 attempts from IP 192.0.2.50
+				{
+					input:   kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.50"},
+					wantErr: nil,
+				},
+				{
+					input:   kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.50"},
+					wantErr: nil,
+				},
+				// User 1 attempt 3: IP count is 3 (<= 4), but email count is 3 (> 2) -> email limit exceeded
+				{
+					input:   kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.50"},
+					wantErr: kagi.ErrRateLimitExceeded,
+				},
+				// User 2 from same IP: attempt 1 for user 2 (<= 2), attempt 4 for IP (<= 4) -> allowed
+				{
+					input:   kagi.SignInInput{Email: "user2@example.com", Password: "any", IPAddress: "192.0.2.50"},
+					wantErr: kagi.ErrInvalidCredentials,
+				},
+				// User 2 from same IP: attempt 5 for IP (> 4) -> IP limit exceeded
+				{
+					input:   kagi.SignInInput{Email: "user2@example.com", Password: "any", IPAddress: "192.0.2.50"},
+					wantErr: kagi.ErrRateLimitExceeded,
+				},
+			},
+		},
+		{
+			name: "non-existent user consumes rate limit attempts with zero user enumeration",
+			cfg: kagi.RateLimitConfig{
+				SignInEmail: kagi.LimitRule{Limit: 2, Window: 15 * time.Minute},
+				SignInIP:    kagi.LimitRule{Limit: 10, Window: 15 * time.Minute},
+			},
+			attempts: []attempt{
+				{
+					input:   kagi.SignInInput{Email: "nonexistent@example.com", Password: "wrong", IPAddress: "192.0.2.1"},
+					wantErr: kagi.ErrInvalidCredentials,
+				},
+				{
+					input:   kagi.SignInInput{Email: "nonexistent@example.com", Password: "wrong", IPAddress: "192.0.2.1"},
+					wantErr: kagi.ErrInvalidCredentials,
+				},
+				{
+					input:   kagi.SignInInput{Email: "nonexistent@example.com", Password: "wrong", IPAddress: "192.0.2.1"},
+					wantErr: kagi.ErrRateLimitExceeded,
+				},
+			},
+		},
+		{
+			name: "missing or empty IPAddress skips IP rate limit but still enforces email rate limit",
+			cfg: kagi.RateLimitConfig{
+				SignInEmail: kagi.LimitRule{Limit: 2, Window: 15 * time.Minute},
+				SignInIP:    kagi.LimitRule{Limit: 1, Window: 15 * time.Minute},
+			},
+			attempts: []attempt{
+				{
+					input:   kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: ""},
+					wantErr: nil,
+				},
+				{
+					input:   kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "   "},
+					wantErr: nil,
+				},
+				{
+					input:   kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: ""},
+					wantErr: kagi.ErrRateLimitExceeded,
+				},
+			},
+		},
+		{
+			name: "case-insensitive email normalization shares rate limit bucket",
+			cfg: kagi.RateLimitConfig{
+				SignInEmail: kagi.LimitRule{Limit: 2, Window: 15 * time.Minute},
+				SignInIP:    kagi.LimitRule{Limit: 10, Window: 15 * time.Minute},
+			},
+			attempts: []attempt{
+				{
+					input:   kagi.SignInInput{Email: "USER@EXAMPLE.COM", Password: validPassword, IPAddress: "192.0.2.1"},
+					wantErr: nil,
+				},
+				{
+					input:   kagi.SignInInput{Email: "  User@Example.Com  ", Password: validPassword, IPAddress: "192.0.2.1"},
+					wantErr: nil,
+				},
+				{
+					input:   kagi.SignInInput{Email: "user@example.com", Password: validPassword, IPAddress: "192.0.2.1"},
+					wantErr: kagi.ErrRateLimitExceeded,
+				},
+			},
+		},
+		{
+			name: "malformed email consumes rate limit attempts before syntax rejection",
+			cfg: kagi.RateLimitConfig{
+				SignInEmail: kagi.LimitRule{Limit: 2, Window: 15 * time.Minute},
+				SignInIP:    kagi.LimitRule{Limit: 10, Window: 15 * time.Minute},
+			},
+			attempts: []attempt{
+				{
+					input:   kagi.SignInInput{Email: "not-an-email", Password: validPassword, IPAddress: "192.0.2.1"},
+					wantErr: kagi.ErrInvalidCredentials,
+				},
+				{
+					input:   kagi.SignInInput{Email: "not-an-email", Password: validPassword, IPAddress: "192.0.2.1"},
+					wantErr: kagi.ErrInvalidCredentials,
+				},
+				{
+					input:   kagi.SignInInput{Email: "not-an-email", Password: validPassword, IPAddress: "192.0.2.1"},
+					wantErr: kagi.ErrRateLimitExceeded,
+				},
+			},
+		},
+		{
+			name: "disabling rate limits via Disabled flag allows unlimited sign-in attempts",
+			cfg: kagi.RateLimitConfig{
+				Disabled:    true,
+				SignInEmail: kagi.LimitRule{Limit: 1, Window: 15 * time.Minute},
+				SignInIP:    kagi.LimitRule{Limit: 1, Window: 15 * time.Minute},
+			},
+			attempts: []attempt{
+				{input: kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"}, wantErr: nil},
+				{input: kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"}, wantErr: nil},
+				{input: kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"}, wantErr: nil},
+			},
+		},
+		{
+			name: "zero limits bypass rate limiting allowing unlimited attempts",
+			cfg: kagi.RateLimitConfig{
+				SignInEmail: kagi.LimitRule{Limit: 0, Window: 15 * time.Minute},
+				SignInIP:    kagi.LimitRule{Limit: 0, Window: 15 * time.Minute},
+			},
+			attempts: []attempt{
+				{input: kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"}, wantErr: nil},
+				{input: kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"}, wantErr: nil},
+				{input: kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"}, wantErr: nil},
+			},
+		},
+		{
+			name: "Option WithRateLimitStore works directly with RateLimitStore",
+			cfg: kagi.RateLimitConfig{
+				SignInEmail: kagi.LimitRule{Limit: 1, Window: 15 * time.Minute},
+				SignInIP:    kagi.LimitRule{Limit: 10, Window: 15 * time.Minute},
+			},
+			useStoreOpt: true,
+			attempts: []attempt{
+				{input: kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"}, wantErr: nil},
+				{input: kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"}, wantErr: kagi.ErrRateLimitExceeded},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			uStore, aStore, _, sessSvc := setupBase()
+			rlStore := memory.NewRateLimitStore()
+
+			var opt kagi.CredentialOption
+			if tt.useStoreOpt {
+				opt = kagi.WithRateLimitStore(rlStore, tt.cfg)
+			} else {
+				opt = kagi.WithRateLimiter(ratelimit.New(rlStore), tt.cfg)
+			}
+
+			credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk,
+				kagi.WithSessionService(sessSvc),
+				opt,
+			)
+
+			for i, att := range tt.attempts {
+				res, err := credSvc.SignIn(context.Background(), att.input)
+				if att.wantErr != nil {
+					if !errors.Is(err, att.wantErr) {
+						t.Fatalf("attempt %d: expected error %v, got %v", i+1, att.wantErr, err)
+					}
+					if res != nil {
+						t.Fatalf("attempt %d: expected nil result on error, got %+v", i+1, res)
+					}
+				} else {
+					if err != nil {
+						t.Fatalf("attempt %d: unexpected error: %v", i+1, err)
+					}
+					if res == nil || res.User == nil || res.Session == nil {
+						t.Fatalf("attempt %d: expected valid AuthResult, got %+v", i+1, res)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestCredential_SignIn_RateLimit_ErrorsAndStorage(t *testing.T) {
+	t.Parallel()
+
+	fixedTime := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	fakeClk := clock.NewFake(fixedTime)
+	pwdCfg := fastPasswordConfig()
+
+	validEmail := "user@example.com"
+	validPassword := "CorrectP@ssw0rd!"
+	validHash, err := crypto.HashPassword(validPassword, pwdCfg.ToArgon2Params())
+	if err != nil {
+		t.Fatalf("failed to hash password: %v", err)
+	}
+
+	setupBase := func() (*spyUserStore, *spyAccountStore, *memory.SessionStore, *kagi.SessionService) {
+		uStore := newSpyUserStore()
+		aStore := newSpyAccountStore()
+		sStore := memory.NewSessionStore(memory.WithClock(fakeClk))
+		sessSvc := kagi.NewSessionService(sStore, nil, kagi.DefaultSessionConfig(), fakeClk)
+
+		_ = uStore.Create(context.Background(), &kagi.User{
+			ID:    "usr_valid",
+			Email: validEmail,
+			Name:  "Valid User",
+		})
+		_ = aStore.Create(context.Background(), &kagi.Account{
+			UserID:            "usr_valid",
+			Provider:          "credential",
+			ProviderAccountID: validEmail,
+			PasswordHash:      validHash,
+		})
+		return uStore, aStore, sStore, sessSvc
+	}
+
+	t.Run("context cancellation returns ctx.Err", func(t *testing.T) {
+		t.Parallel()
+		uStore, aStore, _, sessSvc := setupBase()
+		rlStore := memory.NewRateLimitStore()
+		cfg := kagi.DefaultRateLimitConfig()
+		credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk,
+			kagi.WithSessionService(sessSvc),
+			kagi.WithRateLimitStore(rlStore, cfg),
+		)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := credSvc.SignIn(ctx, kagi.SignInInput{
+			Email:     validEmail,
+			Password:  validPassword,
+			IPAddress: "192.0.2.1",
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	})
+
+	t.Run("backing store error returns unmasked error", func(t *testing.T) {
+		t.Parallel()
+		uStore, aStore, _, sessSvc := setupBase()
+		errStoreFailed := errors.New("underlying postgres timeout")
+		failingStore := ratelimit.StoreFunc(func(ctx context.Context, key string, window time.Duration) (int, error) {
+			return 0, errStoreFailed
+		})
+		cfg := kagi.DefaultRateLimitConfig()
+		credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk,
+			kagi.WithSessionService(sessSvc),
+			kagi.WithRateLimiter(ratelimit.New(failingStore), cfg),
+		)
+
+		_, err := credSvc.SignIn(context.Background(), kagi.SignInInput{
+			Email:     validEmail,
+			Password:  validPassword,
+			IPAddress: "192.0.2.1",
+		})
+		if !errors.Is(err, errStoreFailed) {
+			t.Fatalf("expected %v, got %v", errStoreFailed, err)
+		}
+	})
+
+	t.Run("DB-backed rate limiting works without Redis using in-memory RateLimitStore", func(t *testing.T) {
+		t.Parallel()
+		uStore, aStore, _, sessSvc := setupBase()
+		rlStore := memory.NewRateLimitStore()
+		cfg := kagi.RateLimitConfig{
+			SignInEmail: kagi.LimitRule{Limit: 2, Window: 10 * time.Minute},
+			SignInIP:    kagi.LimitRule{Limit: 5, Window: 10 * time.Minute},
+		}
+		credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk,
+			kagi.WithSessionService(sessSvc),
+			kagi.WithRateLimitStore(rlStore, cfg),
+		)
+
+		in := kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"}
+		if _, err := credSvc.SignIn(context.Background(), in); err != nil {
+			t.Fatalf("first sign-in failed: %v", err)
+		}
+		if _, err := credSvc.SignIn(context.Background(), in); err != nil {
+			t.Fatalf("second sign-in failed: %v", err)
+		}
+		_, err := credSvc.SignIn(context.Background(), in)
+		if !errors.Is(err, kagi.ErrRateLimitExceeded) {
+			t.Fatalf("expected ErrRateLimitExceeded on 3rd attempt, got %v", err)
+		}
+	})
+
+	t.Run("cache-backed rate limiting works using mocked SecondaryStorage", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		mockSec := mock.NewMockSecondaryStorage(ctrl)
+
+		cfg := kagi.RateLimitConfig{
+			SignInEmail: kagi.LimitRule{Limit: 2, Window: 15 * time.Minute},
+			SignInIP:    kagi.LimitRule{Limit: 2, Window: 15 * time.Minute},
+		}
+
+		// Attempt 1: IP count = 1, Email count = 1 -> allowed
+		mockSec.EXPECT().IncrementRateLimit(gomock.Any(), "rl:ip:192.0.2.1", 15*time.Minute).Return(1, nil)
+		mockSec.EXPECT().IncrementRateLimit(gomock.Any(), "rl:auth:user@example.com", 15*time.Minute).Return(1, nil)
+
+		// Attempt 2: IP count = 2, Email count = 2 -> allowed
+		mockSec.EXPECT().IncrementRateLimit(gomock.Any(), "rl:ip:192.0.2.1", 15*time.Minute).Return(2, nil)
+		mockSec.EXPECT().IncrementRateLimit(gomock.Any(), "rl:auth:user@example.com", 15*time.Minute).Return(2, nil)
+
+		// Attempt 3: IP count = 3 -> exceeds limit of 2, email IncrementRateLimit should not be called!
+		mockSec.EXPECT().IncrementRateLimit(gomock.Any(), "rl:ip:192.0.2.1", 15*time.Minute).Return(3, nil)
+
+		limiter := ratelimit.New(ratelimit.StoreFunc(mockSec.IncrementRateLimit))
+		uStore, aStore, _, sessSvc := setupBase()
+		credSvc := kagi.NewCredentialService(uStore, aStore, pwdCfg, fakeClk,
+			kagi.WithSessionService(sessSvc),
+			kagi.WithRateLimiter(limiter, cfg),
+		)
+
+		in := kagi.SignInInput{Email: validEmail, Password: validPassword, IPAddress: "192.0.2.1"}
+		if _, err := credSvc.SignIn(context.Background(), in); err != nil {
+			t.Fatalf("attempt 1 failed: %v", err)
+		}
+		if _, err := credSvc.SignIn(context.Background(), in); err != nil {
+			t.Fatalf("attempt 2 failed: %v", err)
+		}
+		_, err := credSvc.SignIn(context.Background(), in)
+		if !errors.Is(err, kagi.ErrRateLimitExceeded) {
+			t.Fatalf("attempt 3: expected ErrRateLimitExceeded, got %v", err)
 		}
 	})
 }

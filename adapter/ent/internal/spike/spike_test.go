@@ -3,6 +3,7 @@ package spike_test
 import (
 	"context"
 	"errors"
+	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
 	"os"
 	"path/filepath"

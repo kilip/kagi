@@ -28,14 +28,32 @@ import (
 	{{ $sessionNode.Package }} "{{ $sessionNode.Config.Package }}/{{ $sessionNode.PackageDir }}"
 )
 
+// SessionCreateHook is a hook function invoked before saving a new session builder.
+type SessionCreateHook func(ctx context.Context, b *{{ $sessionNode.CreateName }}, s *kagi.Session) error
+
+// SessionStoreOption configures a KagiSessionStore.
+type SessionStoreOption func(*KagiSessionStore)
+
+// WithSessionCreateHook registers a hook to be executed prior to creating a session.
+func WithSessionCreateHook(hook SessionCreateHook) SessionStoreOption {
+	return func(s *KagiSessionStore) {
+		s.createHooks = append(s.createHooks, hook)
+	}
+}
+
 // KagiSessionStore implements kagi.SessionStore using the ent client.
 type KagiSessionStore struct {
-	client *Client
+	client      *Client
+	createHooks []SessionCreateHook
 }
 
 // NewKagiSessionStore creates a new kagi.SessionStore backed by ent.
-func NewKagiSessionStore(client *Client) *KagiSessionStore {
-	return &KagiSessionStore{client: client}
+func NewKagiSessionStore(client *Client, opts ...SessionStoreOption) *KagiSessionStore {
+	s := &KagiSessionStore{client: client}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 var _ kagi.SessionStore = (*KagiSessionStore)(nil)
@@ -55,6 +73,12 @@ func (s *KagiSessionStore) Create(ctx context.Context, sess *kagi.Session) error
 	}
 	if !sess.UpdatedAt.IsZero() {
 		builder.SetUpdatedAt(sess.UpdatedAt)
+	}
+
+	for _, hook := range s.createHooks {
+		if err := hook(ctx, builder, sess); err != nil {
+			return err
+		}
 	}
 
 	created, err := builder.Save(ctx)

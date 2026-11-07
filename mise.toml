@@ -3,6 +3,7 @@ go = "1.27"
 lefthook = "latest"
 cocogitto = "latest"
 swag = "2.0.0-rc6"
+"go:go.uber.org/mock/mockgen" = "0.6.0"
 
 [tasks.test]
 description = "Run tests in every workspace module"

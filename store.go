@@ -52,6 +52,8 @@ import (
 // the domain model and native database column types (UUID, integer, ULID) per ADR-0011. Adapters
 // must also map database-level constraint violations and missing records to domain sentinel errors
 // (ErrUserNotFound, ErrEmailAlreadyExists).
+//
+//go:generate mockgen -destination=mock/user_store.go -package=mock github.com/kilip/kagi UserStore
 type UserStore interface {
 	// Create inserts a new User identity record into storage.
 	//
@@ -122,6 +124,8 @@ type UserStore interface {
 // A single User may have multiple linked Accounts (e.g. local credentials with password_hash,
 // Google OAuth, GitHub OAuth). Adapters must enforce uniqueness on (provider, provider_account_id)
 // and map errors to ErrAccountNotFound or ErrAccountAlreadyExists.
+//
+//go:generate mockgen -destination=mock/account_store.go -package=mock github.com/kilip/kagi AccountStore
 type AccountStore interface {
 	// Create persists a new Account authentication method linked to account.UserID.
 	//
@@ -213,6 +217,8 @@ type AccountStore interface {
 // SessionStore first, and eviction occurs second. Deletion methods (DeleteByID, DeleteByUserID,
 // DeleteOthersByUserID) return the deleted token_hash values to enable deterministic eviction
 // from Redis without requiring secondary user index sets.
+//
+//go:generate mockgen -destination=mock/session_store.go -package=mock github.com/kilip/kagi SessionStore
 type SessionStore interface {
 	// Create persists a new Session entity in storage.
 	//
@@ -388,6 +394,8 @@ type SessionStore interface {
 // Expiry Contract (ADR-0010):
 // Correctness never depends on background cleanup. Read operations (Get) MUST verify that
 // expires_at > now. Expired verification records are treated as non-existent and must return ErrVerificationNotFound.
+//
+//go:generate mockgen -destination=mock/verification_store.go -package=mock github.com/kilip/kagi VerificationStore
 type VerificationStore interface {
 	// Create persists a new Verification record in storage (ADR-0005).
 	//
@@ -475,6 +483,8 @@ type RateLimitEntry struct {
 //
 // Enables Kagi to enforce rate limits reliably without requiring Redis (SecondaryStorage).
 // Adapters must implement atomic fixed-window upsert semantics.
+//
+//go:generate mockgen -destination=mock/rate_limit_store.go -package=mock github.com/kilip/kagi RateLimitStore
 type RateLimitStore interface {
 	// Increment atomically increments the request counter for key within a fixed time window (ADR-0004).
 	//

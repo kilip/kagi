@@ -56,6 +56,8 @@ import (
 // token_hash strings. This enables direct eviction from SecondaryStorage via DeleteSession or
 // DeleteSessions without maintaining secondary index sets (e.g. user-to-session sets) in Redis.
 // DeleteSessions with an empty slice is an idempotent no-op returning nil.
+//
+//go:generate mockgen -destination=mock/secondary_storage.go -package=mock github.com/kilip/kagi SecondaryStorage
 type SecondaryStorage interface {
 	// GetSession retrieves an active session from the fast-tier cache by its SHA-256 token hash (ADR-0014).
 	//

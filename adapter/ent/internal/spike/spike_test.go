@@ -52,7 +52,7 @@ func TestEntcGeneration(t *testing.T) {
 		t.Fatalf("failed running entc.Generate with Kagi extension: %v", err)
 	}
 
-	for _, name := range []string{"kagi_user_store.go", "kagi_account_store.go", "kagi_session_store.go", "kagi_verification_store.go", "kagi_rate_limit_store.go"} {
+	for _, name := range []string{"kagi_user_store.go", "kagi_account_store.go", "kagi_session_store.go", "kagi_verification_store.go", "kagi_rate_limit_store.go", "kagi_adapter.go"} {
 		generatedFile := filepath.Join(tempTarget, name)
 		info, err := os.Stat(generatedFile)
 		if err != nil {
@@ -62,6 +62,11 @@ func TestEntcGeneration(t *testing.T) {
 			t.Fatalf("expected %s to be non-empty", generatedFile)
 		}
 	}
+}
+func TestKagiAdapter_FullConformance(t *testing.T) {
+	client := setupTestClient(t)
+	adapter := ent.NewKagiAdapter(client)
+	adaptertest.RunAll(t, adapter.AsAdaptertestStores())
 }
 
 func TestKagiAccountStore_Conformance(t *testing.T) {

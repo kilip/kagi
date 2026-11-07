@@ -1,0 +1,99 @@
+{{/* gotype: entgo.io/ent/entc/gen.Graph */}}
+
+{{ define "kagi_adapter" }}
+
+{{ $pkg := base $.Config.Package }}
+{{ template "header" $ }}
+
+{{/* Detect presence of each Kagi node */}}
+{{ $hasUser := false }}
+{{ $hasAccount := false }}
+{{ $hasSession := false }}
+{{ $hasVerification := false }}
+{{ $hasRateLimit := false }}
+
+{{ range $n := $.Nodes }}
+	{{ if or (hasKey $n.Annotations "KagiUser") (eq $n.Name "User") }}
+		{{ $hasUser = true }}
+	{{ end }}
+	{{ if or (hasKey $n.Annotations "KagiAccount") (eq $n.Name "Account") }}
+		{{ $hasAccount = true }}
+	{{ end }}
+	{{ if or (hasKey $n.Annotations "KagiSession") (eq $n.Name "Session") }}
+		{{ $hasSession = true }}
+	{{ end }}
+	{{ if or (hasKey $n.Annotations "KagiVerification") (eq $n.Name "Verification") }}
+		{{ $hasVerification = true }}
+	{{ end }}
+	{{ if or (hasKey $n.Annotations "KagiRateLimit") (eq $n.Name "RateLimit") }}
+		{{ $hasRateLimit = true }}
+	{{ end }}
+{{ end }}
+
+import (
+	"github.com/kilip/kagi/adaptertest"
+)
+
+// KagiAdapter bundles generated store pointers backed by an Ent client.
+type KagiAdapter struct {
+	client       *Client
+{{- if $hasUser }}
+	User         *KagiUserStore
+{{- end }}
+{{- if $hasAccount }}
+	Account      *KagiAccountStore
+{{- end }}
+{{- if $hasSession }}
+	Session      *KagiSessionStore
+{{- end }}
+{{- if $hasVerification }}
+	Verification *KagiVerificationStore
+{{- end }}
+{{- if $hasRateLimit }}
+	RateLimit    *KagiRateLimitStore
+{{- end }}
+}
+
+// NewKagiAdapter initializes and returns a KagiAdapter with all available stores.
+func NewKagiAdapter(client *Client) *KagiAdapter {
+	return &KagiAdapter{
+		client:       client,
+{{- if $hasUser }}
+		User:         NewKagiUserStore(client),
+{{- end }}
+{{- if $hasAccount }}
+		Account:      NewKagiAccountStore(client),
+{{- end }}
+{{- if $hasSession }}
+		Session:      NewKagiSessionStore(client),
+{{- end }}
+{{- if $hasVerification }}
+		Verification: NewKagiVerificationStore(client),
+{{- end }}
+{{- if $hasRateLimit }}
+		RateLimit:    NewKagiRateLimitStore(client),
+{{- end }}
+	}
+}
+
+// AsAdaptertestStores converts the KagiAdapter into adaptertest.Stores for conformance testing.
+func (a *KagiAdapter) AsAdaptertestStores() adaptertest.Stores {
+	return adaptertest.Stores{
+{{- if $hasUser }}
+		User:         a.User,
+{{- end }}
+{{- if $hasAccount }}
+		Account:      a.Account,
+{{- end }}
+{{- if $hasSession }}
+		Session:      a.Session,
+{{- end }}
+{{- if $hasVerification }}
+		Verification: a.Verification,
+{{- end }}
+{{- if $hasRateLimit }}
+		RateLimit:    a.RateLimit,
+{{- end }}
+	}
+}
+{{ end }}

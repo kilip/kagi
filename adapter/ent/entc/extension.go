@@ -39,5 +39,7 @@ func (e *Extension) Templates() []*gen.Template {
 		ParseFS(templateFS, "templates/kagi_verification_store.tmpl"))
 	rateLimitTmpl := gen.MustParse(gen.NewTemplate("kagi_rate_limit_store").
 		ParseFS(templateFS, "templates/kagi_rate_limit_store.tmpl"))
-	return []*gen.Template{userTmpl, accountTmpl, sessionTmpl, verificationTmpl, rateLimitTmpl}
+	adapterTmpl := gen.MustParse(gen.NewTemplate("kagi_adapter").
+		ParseFS(templateFS, "templates/kagi_adapter.tmpl"))
+	return []*gen.Template{userTmpl, accountTmpl, sessionTmpl, verificationTmpl, rateLimitTmpl, adapterTmpl}
 }
